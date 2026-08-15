@@ -34,6 +34,7 @@ docker compose ps
 
 - 默认本机 Web 与 HTTP clone：`http://127.0.0.1:8929`
 - 自定义 Web 与 HTTPS clone：`.env` 中可选的 `GITLAB_EXTERNAL_URL`
+- 默认时区：`Asia/Shanghai`；可通过 `.env` 中的 `GITLAB_TIME_ZONE` 修改
 - 本机 SSH：`ssh://git@127.0.0.1:2224/group/project.git`
 
 未配置 `GITLAB_EXTERNAL_URL` 时，GitLab 使用本机默认地址生成链接；配置后则使用该地址。公网 DNS、TLS 和转发仍由独立 gateway 管理。
