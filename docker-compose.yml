@@ -2,7 +2,7 @@ name: dockseed-gitlab
 
 services:
   gitlab:
-    image: gitlab/gitlab-ce:19.2.0-ce.0
+    image: gitlab/gitlab-ce:${GITLAB_VERSION:?请在 .env 中配置 GITLAB_VERSION}
     container_name: dockseed-gitlab
     platform: ${GITLAB_PLATFORM:-linux/arm64}
     restart: unless-stopped
@@ -17,6 +17,7 @@ services:
         gitlab_rails['gitlab_ssh_host'] = '127.0.0.1'
         gitlab_rails['gitlab_shell_ssh_port'] = 2224
         gitlab_rails['time_zone'] = '${GITLAB_TIME_ZONE:-Asia/Shanghai}'
+        puma['socket'] = '/tmp/gitlab.socket'
     ports:
       - "127.0.0.1:8929:80"
       - "127.0.0.1:2224:22"
