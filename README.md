@@ -63,6 +63,8 @@ docker compose logs -f --tail=200 gitlab
 
 Mac 重启后，先启动 Docker Desktop，再在本目录运行 `docker compose up -d`。
 
+启动时会在 GitLab 服务拉起前清理 PostgreSQL 遗留的 Unix socket 和锁文件，避免容器或宿主机非正常停止后旧 PID 与容器内新进程 PID 碰撞，导致 PostgreSQL 无法启动。该清理只删除运行态文件，不涉及数据库数据。
+
 ## 升级 GitLab
 
 修改 `.env` 中的 `GITLAB_VERSION`，然后执行：

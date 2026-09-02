@@ -9,6 +9,10 @@ services:
     shm_size: "256m"
     environment:
       GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:?请在 .env 中配置初始 root 密码}
+      # GitLab's built-in stale-file cleanup does not match PostgreSQL's
+      # .s.PGSQL.* socket and lock files. Remove them before runit starts.
+      GITLAB_PRE_RECONFIGURE_SCRIPT: |
+        rm -f /var/opt/gitlab/postgresql/.s.PGSQL.*
       GITLAB_OMNIBUS_CONFIG: |
         external_url '${GITLAB_EXTERNAL_URL:-http://127.0.0.1:8929}'
         nginx['listen_port'] = 80
