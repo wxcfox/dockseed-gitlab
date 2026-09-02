@@ -18,6 +18,8 @@ services:
         gitlab_rails['gitlab_shell_ssh_port'] = 2224
         gitlab_rails['time_zone'] = '${GITLAB_TIME_ZONE:-Asia/Shanghai}'
         puma['socket'] = '/tmp/gitlab.socket'
+        postgresql['unix_socket_directory'] = '/tmp'
+        gitlab_rails['db_host'] = '/tmp'
     ports:
       - "127.0.0.1:8929:80"
       - "127.0.0.1:2224:22"
