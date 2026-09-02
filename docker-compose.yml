@@ -17,16 +17,13 @@ services:
         gitlab_rails['gitlab_ssh_host'] = '127.0.0.1'
         gitlab_rails['gitlab_shell_ssh_port'] = 2224
         gitlab_rails['time_zone'] = '${GITLAB_TIME_ZONE:-Asia/Shanghai}'
-        puma['socket'] = '/tmp/gitlab.socket'
-        postgresql['unix_socket_directory'] = '/tmp'
-        gitlab_rails['db_host'] = '/tmp'
     ports:
       - "127.0.0.1:8929:80"
       - "127.0.0.1:2224:22"
     volumes:
-      - ./gitlab/config:/etc/gitlab
-      - ./gitlab/logs:/var/log/gitlab
-      - ./gitlab/data:/var/opt/gitlab
+      - dockseed-gitlab-config:/etc/gitlab
+      - dockseed-gitlab-logs:/var/log/gitlab
+      - dockseed-gitlab-data:/var/opt/gitlab
     healthcheck:
       test:
         - CMD-SHELL
@@ -36,3 +33,14 @@ services:
       retries: 20
       start_period: 5m
     stop_grace_period: 10m
+
+volumes:
+  dockseed-gitlab-config:
+    external: true
+    name: dockseed-gitlab-config
+  dockseed-gitlab-logs:
+    external: true
+    name: dockseed-gitlab-logs
+  dockseed-gitlab-data:
+    external: true
+    name: dockseed-gitlab-data

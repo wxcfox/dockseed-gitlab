@@ -16,6 +16,9 @@ Apple Silicon 使用 `linux/arm64`，Intel Mac 使用 `linux/amd64`。
 ```bash
 cp .env.example .env
 chmod 600 .env
+docker volume create dockseed-gitlab-config
+docker volume create dockseed-gitlab-logs
+docker volume create dockseed-gitlab-data
 ```
 
 `GITLAB_VERSION` 使用完整的 GitLab CE 镜像 tag。首次登录用户名为 `root`；`GITLAB_ROOT_PASSWORD` 只在全新数据目录首次初始化时生效。
@@ -76,15 +79,15 @@ docker compose ps
 
 ## 数据持久化
 
-GitLab 使用宿主机 bind mount：
+GitLab 使用 Docker 原生命名卷：
 
-- `gitlab/config` → `/etc/gitlab`：GitLab 配置和密钥
-- `gitlab/logs` → `/var/log/gitlab`：日志
-- `gitlab/data` → `/var/opt/gitlab`：仓库、PostgreSQL、Redis、上传文件及应用数据
+- `dockseed-gitlab-config` → `/etc/gitlab`：GitLab 配置和密钥
+- `dockseed-gitlab-logs` → `/var/log/gitlab`：日志
+- `dockseed-gitlab-data` → `/var/opt/gitlab`：仓库、PostgreSQL、Redis、上传文件及应用数据
 
-Puma socket 位于容器内的 `/tmp`，用于兼容 macOS bind mount。它是临时运行文件，不包含业务数据。
+命名卷由 Docker 的 Linux VM 管理，可保留 GitLab 所需的 Unix 所有权、权限和 socket 语义。不要把运行中的 `/var/opt/gitlab` 直接压缩后解包到 macOS bind mount；机器迁移应使用 GitLab 官方 backup/restore 流程，并单独迁移 `/etc/gitlab`。
 
-容器可以安全重建；不要删除宿主机的 `gitlab/` 目录。
+容器可以安全重建；不要删除上述三个命名卷。
 
 ## 常见问题
 
