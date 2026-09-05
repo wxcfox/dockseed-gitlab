@@ -21,9 +21,25 @@ services:
         gitlab_rails['gitlab_ssh_host'] = '127.0.0.1'
         gitlab_rails['gitlab_shell_ssh_port'] = 2224
         gitlab_rails['time_zone'] = '${GITLAB_TIME_ZONE:-Asia/Shanghai}'
+        # Container Registry：仅在 .env 配置了 GITLAB_REGISTRY_EXTERNAL_URL 时启用。
+        # TLS 与主站一样由前置反向代理终止，容器内 Registry nginx 只监听明文 5050。
+        registry_url = '${GITLAB_REGISTRY_EXTERNAL_URL:-}'
+        unless registry_url.empty?
+          registry_external_url registry_url
+          gitlab_rails['registry_enabled'] = true
+          registry_nginx['listen_port'] = 5050
+          registry_nginx['listen_https'] = false
+          # 反向代理终止 TLS，容器内为 HTTP；显式声明 https，否则分层上传的 Location 会返回 http:// 导致 push 失败。
+          registry_nginx['proxy_set_headers'] = { "X-Forwarded-Proto" => "https", "X-Forwarded-Ssl" => "on" }
+        end
     ports:
       - "127.0.0.1:8929:80"
       - "127.0.0.1:2224:22"
+      # Registry 端口；未启用 Registry 时不发布固定宿主机端口，避免占用。
+      # 绑定地址默认 127.0.0.1，仅在 Runner 需要绕过代理直连推送时改为其可达的内网地址。
+      - target: 5050
+        host_ip: ${GITLAB_REGISTRY_BIND_ADDR:-127.0.0.1}
+        published: "${GITLAB_REGISTRY_EXTERNAL_URL:+${GITLAB_REGISTRY_PORT:-5050}}"
     volumes:
       - dockseed-gitlab-config:/etc/gitlab
       - dockseed-gitlab-logs:/var/log/gitlab
