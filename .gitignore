@@ -4,3 +4,10 @@ gitlab/
 *.tar.gz
 .DS_Store
 .idea/
+# 备份、恢复资料与凭证（不得提交 Secrets）
+.backup-work/
+recovery-work/
+dockseed-????????T??????Z-*/
+gitlab-secrets.json
+*.log
+.ossutil*
