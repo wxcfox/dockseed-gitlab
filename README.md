@@ -9,6 +9,8 @@
 
 Apple Silicon 使用 `linux/arm64`，Intel Mac 使用 `linux/amd64`。
 
+Mac 无需 ESSD，继续使用 Docker Desktop 管理的三个普通命名卷。首次空卷部署按下文显式初始化；已有数据不需要额外挂载或重新初始化。
+
 ## 配置与启动
 
 复制配置模板并按注释填写 `.env`：
@@ -23,6 +25,29 @@ docker volume create dockseed-gitlab-data
 
 `GITLAB_VERSION` 使用完整的 GitLab CE 镜像 tag。首次登录用户名为 `root`；`GITLAB_ROOT_PASSWORD` 只在全新数据目录首次初始化时生效。
 
+### 一次性初始化
+
+仅首次部署或恢复到全新数据卷时执行；初始化命令发现数据库 `PG_VERSION` 已存在就会拒绝执行，包括空文件。已有实例启动失败时，先检查原卷和数据，不删除该文件或用初始化绕过错误。ECS 须先按[存储说明](docs/recovery.md#存储与首次部署)核对 ESSD 的 UUID，并使用其中带挂载检查的初始化命令。
+
+先用 `docker compose ps -a gitlab` 确认正常容器不存在或已停止。若此前对空卷执行 `up` 导致它反复重启，先执行 `docker compose stop --timeout 600 gitlab`，确认状态为 `exited` 后才继续。**初始化期间禁止对正常容器执行 `up`、`start` 或 `restart`**，避免两个容器同时访问数据库；已有业务容器运行时不能直接初始化。
+
+```bash
+docker compose config --quiet &&
+  docker compose run --rm --no-deps --name dockseed-gitlab-init -d -e GITLAB_ALLOW_INITIALIZATION=true gitlab
+docker inspect --format '{{.State.Health.Status}}' dockseed-gitlab-init
+```
+
+等待输出为 `healthy`，再停止初始化容器；未就绪时检查 `docker logs --tail=200 dockseed-gitlab-init`，若已异常退出并被删除则停止流程排查，不反复初始化。这个一次性容器不发布服务端口、不自动重启，退出后自动删除，数据保留在三个卷中。[Compose run 说明](https://docs.docker.com/reference/cli/docker/compose/run/)
+
+```bash
+docker exec -e SVWAIT=600 dockseed-gitlab-init gitlab-ctl stop sidekiq &&
+  docker stop --timeout 600 dockseed-gitlab-init
+```
+
+两步均成功后才正常启动。初始化授权只传给上述一次性容器，**不要把 `GITLAB_ALLOW_INITIALIZATION=true` 写入 `.env` 或日常 Compose**，不要将初始化容器用于业务。
+
+### 正常启动
+
 ```bash
 docker compose config --quiet
 docker compose up -d
@@ -30,6 +55,10 @@ docker compose ps
 ```
 
 等待 `dockseed-gitlab` 显示 `healthy`。
+
+正常容器在 GitLab 官方入口运行前，要求 `/etc/gitlab/gitlab-secrets.json` 与 `/var/opt/gitlab/postgresql/data/PG_VERSION` 均非空；缺任一文件即拒绝启动，避免空卷被自动初始化为新实例。检查覆盖容器自动重启及普通启动，但不验证物理磁盘 UUID 或数据完整性。
+
+已有旧容器需以本次 Compose 重建后才获得检查，单独 `start` 不会更新配置：按「日常操作」先停 Sidekiq 再停止容器，确认原卷及 ECS 挂载后执行 `docker compose up -d gitlab`；保留现有数据，不执行初始化。
 
 访问地址：
 
@@ -123,15 +152,22 @@ Registry 进程、CI 预定义变量和固定的宿主机端口发布随之消�
 
 ## 日常操作
 
+计划停机或重启前，先暂停备份计划并等待当前备份、上传任务结束；下方锁检查失败时停止排查，不能删锁后强行重启。
+
 ```bash
 # 启动
 docker compose up -d
 
 # 停止（保留数据）
-docker compose stop
+docker exec dockseed-gitlab test ! -e /var/opt/gitlab/backups/.dockseed-backup.lock &&
+  docker compose exec -T -e SVWAIT=600 gitlab gitlab-ctl stop sidekiq &&
+  docker compose stop --timeout 600 gitlab
 
 # 重启
-docker compose restart gitlab
+docker exec dockseed-gitlab test ! -e /var/opt/gitlab/backups/.dockseed-backup.lock &&
+  docker compose exec -T -e SVWAIT=600 gitlab gitlab-ctl stop sidekiq &&
+  docker compose stop --timeout 600 gitlab &&
+  docker compose start gitlab
 
 # 状态
 docker compose ps
@@ -142,11 +178,13 @@ docker compose logs -f --tail=200 gitlab
 
 Mac 重启后，先启动 Docker Desktop，再在本目录运行 `docker compose up -d`。
 
+计划停止时先等待 Sidekiq 退出，避免其仍在工作时 PostgreSQL、Redis 已停止；前一步失败时不要继续停容器。
+
 启动时会在 GitLab 服务拉起前清理 PostgreSQL 遗留的 Unix socket 和锁文件，避免容器或宿主机非正常停止后旧 PID 与容器内新进程 PID 碰撞，导致 PostgreSQL 无法启动。该清理只删除运行态文件，不涉及数据库数据。
 
 ## 升级 GitLab
 
-修改 `.env` 中的 `GITLAB_VERSION`，然后执行：
+先暂停备份计划并确认当前备份、上传任务已结束，再修改 `.env` 中的 `GITLAB_VERSION`，然后执行：
 
 ```bash
 docker compose pull gitlab
@@ -169,6 +207,12 @@ GitLab 使用 Docker 原生命名卷：
 命名卷由 Docker 的 Linux VM 管理，可保留 GitLab 所需的 Unix 所有权、权限和 socket 语义。不要把运行中的 `/var/opt/gitlab` 直接压缩后解包到 macOS bind mount；机器迁移应使用 GitLab 官方 backup/restore 流程，并单独迁移 `/etc/gitlab`。
 
 容器可以安全重建；不要删除上述三个命名卷。
+
+## 备份与恢复
+
+`ops/backup.sh` 使用 GitLab 官方工具生成完整本地备份，只需配置工作目录和容量预算，不需要 ossutil 或 OSS 凭证。`ops/transfer.sh` 独立上传、下载与校验备份；上传失败可重传已有目录，无需重新执行 GitLab 备份。具体命令见[备份与人工恢复说明](docs/recovery.md)。
+
+本地备份默认保留，上传时显式追加 `--remove-local` 才在上传全部成功后清理本次备份文件。可选 cron 示例按日保存日志，不提供主动通知，负责人须定期确认最近成功备份。首次上线前须在隔离环境完成真实恢复；ECS 的 ESSD 挂载与 UUID 仍由管理员核对。
 
 ## 常见问题
 
