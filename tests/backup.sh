@@ -90,7 +90,7 @@ case "$1" in
         case "$3" in
             *State.Running*) if [[ $MOCK_CASE = unhealthy ]]; then printf 'true unhealthy\n'; else printf 'true healthy\n'; fi ;;
             '{{.Image}}') printf 'sha256:%064d\n' 0 ;;
-            '{{.Config.Image}}') printf 'gitlab/gitlab-ce:18.8.2-ce.0\n' ;;
+            '{{.Config.Image}}') printf 'gitlab/gitlab-ce:19.3.0-ce.0\n' ;;
             *) bad "$@" ;;
         esac
         exit 0 ;;
@@ -104,6 +104,15 @@ if [[ $1 = env ]]; then
     while [[ $1 = -u ]]; do shift 2; done
 fi
 case "$1" in
+    /opt/gitlab/embedded/bin/ruby)
+        [[ $2 = -ryaml && $3 = -e && $4 = *database-in-use* ]] || bad "$@"
+        [[ $MOCK_CASE != registry-probe-failure ]] || exit 35
+        case "$MOCK_CASE" in
+            registry-invalid-state) printf 'unknown\n' ;;
+            registry-files-*) printf 'true false\n' ;;
+            registry-*) printf 'true true\n' ;;
+            *) printf 'false false\n' ;;
+        esac ;;
     df) exec df "${@:2}" ;;
     mkdir)
         [[ $2 = -m && $3 = 700 ]] || bad "$@"
@@ -128,11 +137,18 @@ case "$1" in
         printf 'external_url "http://fixture.invalid"\ngitlab_rails["initial_root_password"] = "fixture-password-do-not-print"\n' ;;
     dpkg-query)
         [[ $3 = '--showformat=${Package} ${Version} ${db:Status-Status}\n' ]] || bad "$@"
-        if [[ $MOCK_CASE != missing-version ]]; then printf 'gitlab-ce 18.8.2-ce.0 installed\n'; fi
+        if [[ $MOCK_CASE != missing-version ]]; then printf 'gitlab-ce 19.3.0-ce.0 installed\n'; fi
         if [[ $MOCK_CASE = ambiguous-packages ]]; then
-            printf 'gitlab-ee 18.8.2-ee.0 installed\n'
+            printf 'gitlab-ee 19.3.0-ee.0 installed\n'
         else printf 'gitlab-ee  not-installed\n'; fi ;;
-    gitlab-rails) [[ $MOCK_CASE != nonzero-keep-time ]] ;;
+    gitlab-rails)
+        [[ $MOCK_CASE != nonzero-keep-time ]] || exit 36
+        case "$MOCK_CASE" in
+            registry-disabled|registry-files-disabled) printf 'false\n' ;;
+            registry-enabled-invalid) printf 'unknown\n' ;;
+            registry-*) printf 'true\n' ;;
+            *) printf 'false\n' ;;
+        esac ;;
     du) du -k "$MOCK_STATE/container/$3" ;;
     sha256sum)
         if [[ $MOCK_CASE = copy-corruption ]]; then printf '%064d  file\n' 0
@@ -158,10 +174,27 @@ case "$1" in
             [[ -e $MOCK_STATE/release-app ]] || exit 98
         fi
         mkdir -p "$MOCK_STATE/app/db"
-        printf 'fixture logical database dump\n' > "$MOCK_STATE/app/db/database.sql.gz"
-        skip=remote version=18.8.2
+        if [[ $MOCK_CASE != registry-missing-main-db ]]; then
+            printf 'fixture logical database dump\n' | gzip > "$MOCK_STATE/app/db/database.sql.gz"
+        fi
+        case "$MOCK_CASE" in
+            registry-*)
+                if [[ $MOCK_CASE != registry-missing-dump && $MOCK_CASE != registry-files-* ]]; then
+                    printf 'fixture registry metadata dump\n' | gzip > "$MOCK_STATE/app/db/registry_database.sql.gz"
+                fi
+                if [[ $MOCK_CASE = registry-empty-dump ]]; then
+                    printf '' | gzip > "$MOCK_STATE/app/db/registry_database.sql.gz"
+                fi
+                if [[ $MOCK_CASE = registry-corrupt-dump ]]; then
+                    printf 'not gzip\n' > "$MOCK_STATE/app/db/registry_database.sql.gz"
+                fi
+                if [[ $MOCK_CASE != registry-missing-files && $MOCK_CASE != registry-files-missing ]]; then
+                    printf 'fixture registry layers\n' | gzip > "$MOCK_STATE/app/registry.tar.gz"
+                fi ;;
+        esac
+        skip=remote version=19.3.0
         if [[ $MOCK_CASE = partial-backup ]]; then skip=remote,repositories; fi
-        if [[ $MOCK_CASE = wrong-version ]]; then version=18x8y2; fi
+        if [[ $MOCK_CASE = wrong-version ]]; then version=19x3y0; fi
         if [[ $MOCK_CASE != missing-metadata ]]; then
             printf -- '---\n:backup_created_at: 2026-09-14 00:00:00.000000000 Z\n:gitlab_version: %s\n:skipped: %s\n' "$version" "$skip" > "$MOCK_STATE/app/backup_information.yml"
         fi
@@ -198,6 +231,15 @@ setup() {
     done
     if [[ $1 != missing-rb ]]; then printf '# fixture\n' > "$MOCK_STATE/container/etc/gitlab/gitlab.rb"; fi
     if [[ $1 != missing-secret ]]; then printf '{}\n' > "$MOCK_STATE/container/etc/gitlab/gitlab-secrets.json"; fi
+    case "$1" in
+        registry-*)
+            mkdir -p "$MOCK_STATE/container/opt/gitlab/etc/gitlab-backup/env"
+            for credential in env-connection env-backup_user env-restore_user; do
+                if [[ $1 != "registry-missing-$credential" ]]; then
+                    printf 'fixture-password-do-not-print\n' > "$MOCK_STATE/container/opt/gitlab/etc/gitlab-backup/env/$credential"
+                fi
+            done ;;
+    esac
     : > "$MOCK_STATE/commands"
 }
 reject_matches() {
@@ -245,7 +287,7 @@ run_case() {
         reject_matches 'backup: success;' "$MOCK_STATE/errors"
         for run in "$BACKUP_WORK_DIR"/dockseed-*; do [[ ! -e $run/LOCAL_COMPLETE ]]; done
         case "$scenario" in
-            unhealthy|low-space|low-work-space|low-backup-space|df-failure|publish-failure|work-create-failure|log-create-failure|nonzero-keep-time|missing-secret|missing-rb|missing-version|ambiguous-packages|git-failure|missing-runtime-config|deployment-archive-failure)
+            unhealthy|low-space|low-work-space|low-backup-space|df-failure|publish-failure|work-create-failure|log-create-failure|nonzero-keep-time|missing-secret|missing-rb|missing-version|ambiguous-packages|git-failure|missing-runtime-config|deployment-archive-failure|registry-probe-failure|registry-invalid-state|registry-missing-env-*|registry-disabled|registry-files-disabled|registry-enabled-invalid)
                 [[ ! -e $lock ]]
                 if [[ $scenario != publish-failure ]]; then reject_matches 'gitlab-backup create' "$MOCK_STATE/commands"; fi ;;
             *) [[ -d $lock ]] ;;
@@ -269,6 +311,23 @@ for variable in INCREMENTAL PREVIOUS_BACKUP REPOSITORIES_SERVER_SIDE REPOSITORIE
 done
 run_case separate-filesystems pass
 reject_matches 'df -Pk /tmp$' "$MOCK_STATE/commands"
+grep -qx 'registry_database=false' "$(cat "$MOCK_STATE/output")/manifest.txt"
+run_case registry-success pass
+grep -qx 'registry_database=true' "$(cat "$MOCK_STATE/output")/manifest.txt"
+run_case registry-files-success pass
+grep -qx 'registry_database=false' "$(cat "$MOCK_STATE/output")/manifest.txt"
+reject_matches 'test -s /opt/gitlab/etc/gitlab-backup/env/' "$MOCK_STATE/commands"
+run_case registry-files-missing
+for scenario in registry-disabled registry-files-disabled; do
+    run_case "$scenario"
+    grep -q 're-enable Registry' "$MOCK_STATE/errors"
+done
+run_case registry-enabled-invalid
+for scenario in registry-probe-failure registry-invalid-state \
+    registry-missing-env-connection registry-missing-env-backup_user registry-missing-env-restore_user \
+    registry-missing-dump registry-missing-main-db registry-empty-dump registry-corrupt-dump registry-missing-files; do
+    run_case "$scenario"
+done
 run_case low-work-space
 grep -Fq 'host work directory: need 81.0 GiB, available 40.0 GiB' "$MOCK_STATE/errors"
 run_case low-backup-space
@@ -325,3 +384,31 @@ preserved
 local_valid "$MOCK_STATE/first-output"
 passed=$((passed + 1))
 printf 'PASS: backup / concurrent across work directories\nAll %s backup mock tests passed.\n' "$passed"
+
+# Execute the production probe against local YAML fixtures, not mocked booleans.
+# Ruby is bundled in GitLab; on the test host this extra check is optional.
+if command -v ruby >/dev/null 2>&1; then
+    probe=$(sed -n '/^registry_state=\$(docker exec/,/^'"'"')/p' "$repo/ops/backup.sh" | sed '1d;$d')
+    [[ -n $probe ]]
+    probe=${probe//\/var\/opt\/gitlab/$fixture/probe}
+    mkdir -p "$fixture/probe/registry" "$fixture/probe/gitlab-rails/shared/registry/docker/registry/lockfiles"
+    config="$fixture/probe/registry/config.yml"
+    for enabled in '"prefer"' '"true"' true false '"false"'; do
+        printf 'database:\n  enabled: %s\n' "$enabled" > "$config"
+        expected='true true'
+        case "$enabled" in false|'"false"') expected='true false' ;; esac
+        [[ $(ruby -ryaml -e "$probe") = "$expected" ]]
+        printf 'PASS: Registry probe / enabled=%s\n' "$enabled"
+    done
+    rm "$config"
+    [[ $(ruby -ryaml -e "$probe") = 'false false' ]]
+    : > "$fixture/probe/gitlab-rails/shared/registry/docker/registry/lockfiles/database-in-use"
+    [[ $(ruby -ryaml -e "$probe") = 'true true' ]]
+    printf 'database: [\n' > "$config"
+    if ruby -ryaml -e "$probe" > /dev/null 2>&1; then
+        printf 'FAIL: malformed Registry YAML accepted\n' >&2; exit 1
+    fi
+    printf 'PASS: Registry probe / absent config, retained metadata, malformed YAML\n'
+else
+    printf 'SKIP: Registry YAML probe fixtures (host Ruby unavailable)\n'
+fi
