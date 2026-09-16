@@ -80,3 +80,45 @@ for attempt in 1 2 3; do
     run_case "repeated-start-$attempt" missing missing "$normal_mode" fail
 done
 printf 'All %s startup guard tests passed.\n' "$passed"
+
+# Optional Compose rendering only: no daemon access, containers, volumes or real .env.
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    printf 'SKIP: Compose configuration checks (Docker Compose CLI unavailable).\n'
+    exit 0
+fi
+cp "$compose" "$fixture/docker-compose.yml"
+render() {
+    env -i PATH="$PATH" HOME="$HOME" docker compose --project-directory "$fixture" \
+        --env-file "$fixture/compose.env" -f "$fixture/docker-compose.yml" config > "$fixture/rendered.yml"
+}
+cat > "$fixture/compose.env" <<'ENV'
+GITLAB_VERSION=19.3.0-ce.0
+GITLAB_ROOT_PASSWORD=offline-fixture-only
+ENV
+render
+grep -Fq 'image: gitlab/gitlab-ce:19.3.0-ce.0' "$fixture/rendered.yml"
+grep -Fq 'platform: linux/arm64' "$fixture/rendered.yml"
+grep -Fq 'restart: unless-stopped' "$fixture/rendered.yml"
+[[ $(grep -c 'host_ip: 127.0.0.1' "$fixture/rendered.yml") = 3 ]]
+printf 'PASS: Compose / Mac defaults\n'
+
+cat >> "$fixture/compose.env" <<'ENV'
+GITLAB_PLATFORM=linux/amd64
+GITLAB_EXTERNAL_URL=http://203.0.113.10:8929
+GITLAB_SSH_HOST=203.0.113.10
+GITLAB_BIND_ADDR=0.0.0.0
+GITLAB_REGISTRY_EXTERNAL_URL=http://192.0.2.10:5050
+GITLAB_REGISTRY_BIND_ADDR=192.0.2.10
+GITLAB_RESTART_POLICY=no
+ENV
+render
+grep -Fq 'image: gitlab/gitlab-ce:19.3.0-ce.0' "$fixture/rendered.yml"
+grep -Fq 'platform: linux/amd64' "$fixture/rendered.yml"
+grep -Eq "restart: [\"']?no[\"']?$" "$fixture/rendered.yml"
+grep -Fq "gitlab_rails['gitlab_ssh_host'] = '203.0.113.10'" "$fixture/rendered.yml"
+grep -Fq "registry_url = 'http://192.0.2.10:5050'" "$fixture/rendered.yml"
+[[ $(grep -c 'host_ip: 0.0.0.0' "$fixture/rendered.yml") = 2 ]]
+grep -Fq 'host_ip: 192.0.2.10' "$fixture/rendered.yml"
+grep -Fq 'GITLAB_ALLOW_INITIALIZATION: "false"' "$fixture/rendered.yml"
+[[ $(grep -c 'external: true' "$fixture/rendered.yml") = 3 ]]
+printf 'PASS: Compose / ECS IP access and isolated restart policy\n'

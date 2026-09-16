@@ -8,7 +8,7 @@ exec 3>&2 4>&1
 fail() { printf 'backup: %s\n' "$*" >&3; exit 1; }
 log() { printf '%s backup: %s\n' "$(date -u +%FT%TZ)" "$*" >&3; }
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-for tool in docker git tar; do
+for tool in docker git tar gzip; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing dependency: $tool"
 done
 if command -v sha256sum >/dev/null 2>&1; then
@@ -72,10 +72,38 @@ trap 'exit 143' TERM HUP
 log "preflight $run_id; private details: $log_file"
 
 # Require disabled GitLab retention so the command cannot prune historical files.
-docker exec "$cid" gitlab-rails runner \
-    'abort "backup_path must be /var/opt/gitlab/backups" unless Gitlab.config.backup.path.to_s == "/var/opt/gitlab/backups"; abort "backup keep_time must be zero" unless Gitlab.config.backup.keep_time.to_i == 0'
+registry_enabled=$(docker exec "$cid" gitlab-rails runner \
+    'abort "backup_path must be /var/opt/gitlab/backups" unless Gitlab.config.backup.path.to_s == "/var/opt/gitlab/backups"
+     abort "backup keep_time must be zero" unless Gitlab.config.backup.keep_time.to_i == 0
+     puts Gitlab.config.registry.enabled')
+[[ $registry_enabled = true || $registry_enabled = false ]] || fail 'cannot determine whether Registry is enabled'
 docker exec "$cid" test -s /etc/gitlab/gitlab-secrets.json
 docker exec "$cid" test -s /etc/gitlab/gitlab.rb
+# Read only two booleans using GitLab's bundled Ruby; never print registry credentials.
+# The marker also protects retained metadata when Registry has been disabled.
+registry_state=$(docker exec "$cid" /opt/gitlab/embedded/bin/ruby -ryaml -e '
+    path = "/var/opt/gitlab/registry/config.yml"
+    config = File.file?(path) ? YAML.load_file(path) : {}
+    database = ["prefer", "true", true].include?(config.dig("database", "enabled")) ||
+        File.exist?("/var/opt/gitlab/gitlab-rails/shared/registry/docker/registry/lockfiles/database-in-use")
+    puts "#{File.file?(path) || database} #{database}"
+')
+case "$registry_state" in
+    'true true'|'true false'|'false false') ;;
+    *) fail 'cannot determine Registry files and metadata database usage' ;;
+esac
+read -r registry_files registry_database <<< "$registry_state"
+if [[ $registry_enabled = true ]]; then
+    registry_files=true
+elif [[ $registry_files = true ]]; then
+    fail 'Registry is disabled but retained configuration/data exists; re-enable Registry before backing up its data (see README: 关闭 Registry)'
+fi
+if [[ $registry_database = true ]]; then
+    for credential in env-connection env-backup_user env-restore_user; do
+        docker exec "$cid" test -s "/opt/gitlab/etc/gitlab-backup/env/$credential" ||
+            fail 'Registry metadata database requires backup/restore roles; see docs/recovery.md#registry-元数据库'
+    done
+fi
 # dpkg may also list the other edition as not-installed, with an empty version.
 package=$(docker exec "$cid" dpkg-query --show '--showformat=${Package} ${Version} ${db:Status-Status}\n' 'gitlab-?e' |
     awk '$3 == "installed" {print $1, $2}')
@@ -145,7 +173,20 @@ for required in gitlab.rb gitlab-secrets.json; do
     [[ $archived_bytes -gt 0 ]] || fail "empty archived $required"
 done
 tar -tf "$run/$app_file" > "$run/application-members.txt"
-grep -Eq '^(\./)?db/[^/]+\.sql\.gz$' "$run/application-members.txt" || fail 'application archive missing database dump'
+databases=(database)
+if [[ $registry_database = true ]]; then
+    databases+=(registry_database)
+fi
+if [[ $registry_files = true ]]; then
+    grep -Eq '^(\./)?registry\.tar\.gz$' "$run/application-members.txt" || fail 'application archive missing Registry files; keep Registry enabled when backing up its data'
+fi
+for database in "${databases[@]}"; do
+    member=$(grep -Fx -e "db/$database.sql.gz" -e "./db/$database.sql.gz" "$run/application-members.txt") ||
+        fail "application archive missing $database dump"
+    [[ $member != *$'\n'* ]] || fail "ambiguous $database dump"
+    archived_bytes=$(tar -xOf "$run/$app_file" "$member" | gzip -dc | wc -c | tr -d ' ') || fail "cannot read $database dump"
+    [[ $archived_bytes -gt 0 ]] || fail "empty $database dump"
+done
 metadata_member=$(grep -Ex '(\./)?backup_information.yml' "$run/application-members.txt") || fail 'application archive missing backup metadata'
 tar -xOf "$run/$app_file" "$metadata_member" > "$run/backup_information.yml"
 grep -Eq '^:?(backup_created_at|backup_id):' "$run/backup_information.yml" || fail 'missing backup identity/time metadata'
@@ -172,6 +213,7 @@ image_reference=$image_ref
 image_id=$image_id
 image_platform=$platform
 project_commit=$commit
+registry_database=$registry_database
 restore_tested=no
 MANIFEST
 files=("$app_file" config.tar deployment.tar manifest.txt)

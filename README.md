@@ -1,17 +1,19 @@
 # DockSeed GitLab
 
-使用 Docker Compose 在本机运行 GitLab CE。Cloudflare Tunnel、DNS 和公网入口由独立的 `dockseed-cloudflared` 工程管理。
+使用一份 Docker Compose 在 Mac 或 Linux ECS 上运行 GitLab CE。可通过 IP 访问，也可由反向代理提供域名和 HTTPS；配套的 `dockseed-cloudflared` 工程负责 Tunnel 与 DNS。
 
 ## 前置条件
 
-- Docker Desktop 与 Docker Compose v2
-- Docker Desktop 建议至少分配 6 GB 内存
+- Mac：Docker Desktop（建议至少分配 6 GB 内存）与 Docker Compose v2
+- ECS：Docker Engine、Compose v2，独立数据盘按[存储说明](docs/recovery.md#存储与首次部署)挂载
 
 Apple Silicon 使用 `linux/arm64`，Intel Mac 使用 `linux/amd64`。
 
 Mac 无需 ESSD，继续使用 Docker Desktop 管理的三个普通命名卷。首次空卷部署按下文显式初始化；已有数据不需要额外挂载或重新初始化。
 
 ## 配置与启动
+
+以下是 **Mac 全新部署**步骤；ECS 使用[迁移与恢复说明](docs/recovery.md)，不要先创建普通命名卷。已有 Mac 数据迁往 ECS 属于恢复流程，不能直接在 ECS 上初始化后当作迁移完成。
 
 复制配置模板并按注释填写 `.env`：
 
@@ -35,9 +37,10 @@ docker volume create dockseed-gitlab-data
 docker compose config --quiet &&
   docker compose run --rm --no-deps --name dockseed-gitlab-init -d -e GITLAB_ALLOW_INITIALIZATION=true gitlab
 docker inspect --format '{{.State.Health.Status}}' dockseed-gitlab-init
+docker logs --since "$(docker inspect --format '{{.State.StartedAt}}' dockseed-gitlab-init)" dockseed-gitlab-init 2>&1 | grep -F 'gitlab Reconfigured!'
 ```
 
-等待输出为 `healthy`，再停止初始化容器；未就绪时检查 `docker logs --tail=200 dockseed-gitlab-init`，若已异常退出并被删除则停止流程排查，不反复初始化。这个一次性容器不发布服务端口、不自动重启，退出后自动删除，数据保留在三个卷中。[Compose run 说明](https://docs.docker.com/reference/cli/docker/compose/run/)
+须同时看到 `healthy` 和**本次启动**日志中的 `gitlab Reconfigured!`，再停止初始化容器。健康检查可能早于配置流程结束，此时停服务会打断初始化；尚未出现完成日志就继续等待。未就绪时检查 `docker logs --tail=200 dockseed-gitlab-init`，若已异常退出并被删除则停止流程排查，不反复初始化。这个一次性容器不发布服务端口、不自动重启，退出后自动删除，数据保留在三个卷中。[Compose run 说明](https://docs.docker.com/reference/cli/docker/compose/run/)
 
 ```bash
 docker exec -e SVWAIT=600 dockseed-gitlab-init gitlab-ctl stop sidekiq &&
@@ -65,7 +68,20 @@ docker compose ps
 - Web：`http://127.0.0.1:8929`，或 `.env` 中配置的 `GITLAB_EXTERNAL_URL`
 - SSH：`ssh://git@127.0.0.1:2224/group/project.git`
 
-公网接入由 `dockseed-cloudflared` 转发本机 8929 端口。在该工程中执行：
+### ECS 通过 IP 访问
+
+在 `.env` 中设置以下参数，Compose 无需修改（示例 IP 须替换）：
+
+```dotenv
+GITLAB_PLATFORM=linux/amd64
+GITLAB_EXTERNAL_URL=http://203.0.113.10:8929
+GITLAB_SSH_HOST=203.0.113.10
+GITLAB_BIND_ADDR=0.0.0.0
+```
+
+`GITLAB_EXTERNAL_URL` 决定页面及 HTTP Clone 地址，`GITLAB_SSH_HOST` 决定 SSH Clone 地址，`GITLAB_BIND_ADDR` 决定监听网卡。ECS 安全组只向需要访问的来源放行 TCP `8929` 和 `2224`，临时验收时限制为管理员出口 IP。HTTP 会明文传输密码和会话，长期使用应配置 HTTPS。恢复验收前保持入口隔离。
+
+Mac 不配置这些参数时仍只监听 `127.0.0.1`。使用 Tunnel 时由 `dockseed-cloudflared` 转发本机 8929 端口，在该工程中执行：
 
 ```bash
 ./start.sh add gitlab 8929
@@ -101,6 +117,10 @@ Registry 沿用主站的接入模式：容器内只监听明文 HTTP，不引入
    ```bash
    ./start.sh add registry 5050
    ```
+
+如启用 Registry 元数据库，首次备份前按[Registry 元数据库](docs/recovery.md#registry-元数据库)配置官方备份/恢复角色，否则镜像层文件存在也不能保证标签可恢复。
+
+暂不使用域名时，可将 `GITLAB_REGISTRY_EXTERNAL_URL` 设为 `http://内网IP:5050`、`GITLAB_REGISTRY_BIND_ADDR` 设为该内网 IP；只允许需要的 Runner/客户端访问，并为客户端配置对应地址的 HTTP Registry。协议头会随 URL 切换，不能仅修改绑定地址就把 HTTPS 地址当成 HTTP 地址使用。
 
 ### 前置代理要求
 
@@ -148,7 +168,7 @@ build:
 docker compose up -d
 ```
 
-Registry 进程、CI 预定义变量和固定的宿主机端口发布随之消失。已推送的镜像数据仍留在 `dockseed-gitlab-data` 卷中，重新启用后可继续使用；需要释放空间时手动清理容器内的 `/var/opt/gitlab/gitlab-rails/shared/registry`。前置代理侧记得同步删除 Registry 子域名的转发。
+Registry 进程、CI 预定义变量和固定的宿主机端口发布随之消失。已推送的镜像数据仍留在 `dockseed-gitlab-data` 卷中，重新启用后可继续使用。关闭后若仍留有 Registry 配置或数据标记，备份脚本会在加锁前拒绝执行；请重新启用 Registry 再备份，避免遗漏历史镜像。脚本不提供跳过 Registry 数据的开关。需要释放空间时使用 GitLab 官方清理机制，不直接删除镜像存储目录。前置代理侧记得同步删除 Registry 子域名的转发。
 
 ## 日常操作
 
@@ -184,10 +204,15 @@ Mac 重启后，先启动 Docker Desktop，再在本目录运行 `docker compose
 
 ## 升级 GitLab
 
-先暂停备份计划并确认当前备份、上传任务已结束，再修改 `.env` 中的 `GITLAB_VERSION`，然后执行：
+先完成一次备份与上传，再暂停备份计划并确认当前任务已结束。修改 `.env` 中的 `GITLAB_VERSION`，先拉取镜像（失败时旧实例仍可继续运行）：
 
 ```bash
 docker compose pull gitlab
+```
+
+拉取成功后按「日常操作」先停 Sidekiq 再停容器，再执行：
+
+```bash
 docker compose up -d gitlab
 docker compose ps
 ```
@@ -219,5 +244,5 @@ GitLab 使用 Docker 原生命名卷：
 - **本机无法访问**：运行 `docker compose ps`，确认 GitLab 为 `healthy`，再查看 `docker compose logs --tail=200 gitlab`。
 - **启动时间过长**：GitLab 启动通常需要数分钟；Docker Desktop 内存不足时会更久。
 - **端口冲突**：检查本机 8929、2224 或 `GITLAB_REGISTRY_PORT`（默认 5050）端口占用。
-- **公网入口失败**：在 `dockseed-cloudflared` 工程中排查。
+- **公网入口失败**：IP 直连先查 `.env` 绑定地址、安全组和宿主机防火墙；Tunnel 接入在 `dockseed-cloudflared` 工程中排查。
 - **docker push 报 413 或中途断开**：检查前置代理的请求体上限与超时；无法放宽时按「前置代理要求」改为直连 Registry 的 HTTP 端口推送。
