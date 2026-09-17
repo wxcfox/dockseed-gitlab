@@ -82,9 +82,16 @@ mode = Ali-EcsRamRole
 region = cn-shanghai
 ```
 
-Mac 首次使用先运行 `ossutil version` 确认是 2.x，再运行 `umask 077` 和 `ossutil config`。配置路径使用当前用户家目录下的完整路径（如 `/Users/你的用户名/.ossutilconfig`），填写 RAM 用户的完整 AccessKey ID、Secret、Bucket 地域和 HTTPS Endpoint；不能填写控制台中带 `***` 的脱敏值。不要将密钥写在命令行或项目 `.env` 中。自定义配置文件或 profile 可通过 ossutil 官方环境变量 `OSSUTIL_CONFIG_FILE`、`OSSUTIL_PROFILE` 选择，无需修改脚本。
+Mac 首次使用先运行 `ossutil version` 确认是 2.x，再运行 `umask 077` 和 `ossutil config`。已有个人配置时，为这次部署填写独立的绝对路径（如 `/Users/你的用户名/.ossutil-gitlab`），不覆盖原文件。填写 RAM 用户的完整 AccessKey ID、Secret、Bucket 地域和 HTTPS Endpoint；不能填写控制台中带 `***` 的脱敏值。不要将密钥写在命令行或项目 `.env` 中。
 
-若提示 `Credentials is null or empty`，先核对配置文件路径、默认 profile 和凭证是否完整；`AccessDenied` 检查授权及前缀；`PublicEndpointForbidden` 按 OSS 官方说明配置自定义 HTTPS 域名，不能靠扩大权限解决。[ossutil 配置](https://help.aliyun.com/zh/oss/developer-reference/ossutil-overview/)、[公网域名限制](https://help.aliyun.com/zh/oss/publicendpointforbidden-error-when-upload-object)
+上传、下载前显式选择配置文件；以下变量仅影响当前终端，定时任务须另行设置。ECS 以 root 执行时通常使用 `/root/.ossutilconfig`，其他用户改为自己的路径。脚本直接沿用 ossutil 的配置方式，无需新增凭证参数：
+
+```bash
+export OSSUTIL_CONFIG_FILE="$HOME/.ossutil-gitlab" # 改为实际配置文件的绝对路径
+export OSSUTIL_PROFILE=default
+```
+
+若提示 `Credentials is null or empty` 或 `region must be set in sign version 4`，先核对**实际执行用户**能否读取上述文件、所选 profile 及 region/凭证是否完整；交互终端成功不代表 cron 使用了相同配置。`AccessDenied` 检查授权及前缀；`PublicEndpointForbidden` 按 OSS 官方说明配置自定义 HTTPS 域名，不能靠扩大权限解决。[ossutil 配置](https://help.aliyun.com/zh/oss/developer-reference/ossutil-overview/)、[公网域名限制](https://help.aliyun.com/zh/oss/publicendpointforbidden-error-when-upload-object)
 
 ## 本地备份
 
@@ -126,7 +133,11 @@ BACKUP_WORK_DIR="$HOME/gitlab-backup-work" BACKUP_ESTIMATE_KB=20971520 bash ops/
 
 只有成功时 stdout 才输出完整目录的绝对路径，阶段日志走 stderr。看到 `success; local backup ready` 后保存最后一行路径，供上传使用；不必重新执行备份。完整目录含四个备份文件：应用原始 ID 的 `_gitlab_backup.tar`、`config.tar`、`deployment.tar`、`manifest.txt`，以及 `SHA256SUMS`、`LOCAL_COMPLETE` 和私有 `operations.log`。成功后仅清理本次容器临时备份并释放锁，本地备份保留。
 
-配置包必须含 gitlab.rb 与 Secrets；部署包含当前 Compose、真实 `.env`、实际注入的 `runtime-omnibus.rb`、README、两个脚本和恢复说明。清单记录精确 GitLab 版本、CE/EE、镜像标识/平台、备份 ID/文件名/时间及工程提交。`.env` 不能作为 Shell 脚本 `source`。
+配置包必须含 gitlab.rb 与 Secrets；部署包仅包含 `docker-compose.yml`、真实 `.env`、实际注入的 `runtime-omnibus.rb`、README、两个脚本和恢复说明。清单记录精确 GitLab 版本、CE/EE、镜像标识/平台、备份 ID/文件名/时间及工程提交。`.env` 不能作为 Shell 脚本 `source`。
+
+**这不是整台服务器的备份。** `compose.override.yml`、其他 Compose 覆盖文件、systemd/cron、磁盘挂载、反向代理、DNS、TLS 和网络配置均不在部署包中；`runtime-omnibus.rb` 也不包含端口、网络或卷的覆盖设置。使用这些配置时，另存环境说明及必要文件，并确保 GitLab 不可用时仍可取得；凭据另行保护，不提交到本工程。
+
+环境覆盖文件用于调整端口、网络等部署设置，不得覆盖启动 `command`、`GITLAB_ALLOW_INITIALIZATION` 或三个数据卷的绑定；修改后用 `docker compose config` 私下核对合并结果（可能含密码，不贴到公开日志）。
 
 配置、版本、Git 提交和部署资料检查在加锁前完成，这些检查失败不会留下容器锁。已有锁时直接拒绝执行，通常不再创建本地目录；两个任务同时争锁时，未取得锁的一方可能留下诊断目录。
 
@@ -166,10 +177,24 @@ OSS_ENDPOINT=https://oss-cn-shanghai.aliyuncs.com bash ops/transfer.sh download 
 
 传输日志保存在本次目录的 `transfer.log`。强制终止进程可能留下 `.transfer.lock`；确认对应传输进程已结束后，才用 `rmdir /本次目录/.transfer.lock` 释放，不删除备份文件。
 
-首次手工备份、上传及隔离恢复验收后，可在 ECS Linux 的 crontab 串联每 6 小时备份与上传；确认已有 `flock`（`command -v flock`）。锁覆盖整段备份和上传，取锁失败就退出而不排队；结束后自动释放，`.cron.lock` 文件保留，无需删除。Mac 手工备份不依赖 `flock`。路径和参数按实际修改：
+首次手工备份、上传及隔离恢复验收后，可在 ECS Linux 的 crontab 串联每 6 小时备份与上传；确认已有 `flock`（`command -v flock`）。锁覆盖整段备份和上传，取锁失败就退出而不排队；结束后自动释放，`.cron.lock` 文件保留，无需删除。Mac 手工备份不依赖 `flock`。
+
+以下放入**执行备份用户的 `crontab -e`**，不是 `/etc/cron.d` 文件；后者还需要执行用户列。示例按 root 的配置路径填写，其他用户须修改。先用同一用户和以下配置完成手工上传；变量行与任务行一起保存，cron 不继承交互终端的 `export`。
+
+请放在 crontab 末尾，并先核对已有任务：这些变量影响其后的所有任务，示例 `PATH` 不含 `/usr/sbin`、`/sbin`，`MAILTO=""` 关闭后续任务的邮件，`OSS_ENDPOINT` 也会影响其他 ossutil 命令：
 
 ```cron
-0 */6 * * * umask 077; ( date -u; export PATH=/usr/local/bin:/usr/bin:/bin; flock -n 9 || { echo 'scheduled backup already running or lock unavailable; no backup started'; exit 1; }; cd /opt/dockseed-gitlab && backup_dir=$(BACKUP_WORK_DIR=/srv/gitlab/backup-work BACKUP_ESTIMATE_KB=20971520 ./ops/backup.sh) && OSS_DESTINATION=oss://your-private-bucket/gitlab/daily OSS_ENDPOINT=https://oss-cn-shanghai.aliyuncs.com ./ops/transfer.sh upload "$backup_dir" --remove-local ) 9>> /srv/gitlab/backup-work/.cron.lock >> "/srv/gitlab/backup-work/scheduled-backup-$(date +\%Y\%m\%d).log" 2>&1
+# 放在 crontab 末尾；以下环境变量对后续所有任务生效。
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+OSSUTIL_CONFIG_FILE=/root/.ossutilconfig
+OSSUTIL_PROFILE=default
+OSS_DESTINATION=oss://your-private-bucket/gitlab/daily
+OSS_ENDPOINT=https://oss-cn-shanghai.aliyuncs.com
+BACKUP_WORK_DIR=/srv/gitlab/backup-work
+BACKUP_ESTIMATE_KB=20971520
+0 */6 * * * umask 077; ( date -u; flock -n 9 || { echo 'scheduled backup already running or lock unavailable; no backup started'; exit 1; }; cd /opt/dockseed-gitlab && backup_dir=$(./ops/backup.sh) && ./ops/transfer.sh upload "$backup_dir" --remove-local ) 9>> "$BACKUP_WORK_DIR/.cron.lock" >> "$BACKUP_WORK_DIR/scheduled-backup-$(date +\%Y\%m\%d).log" 2>&1
 ```
 
 本工程不提供主动通知，无需配置邮件或通知接口。日志按任务启动时的服务器本地日期保存为 `scheduled-backup-YYYYMMDD.log`，如 `scheduled-backup-20260916.log`，同日追加、跨日新建；任务跨过午夜仍写入启动日的文件。内容包含 UTC 开始时间、阶段结果和早期错误。目录须已存在且可写，新文件权限为 `0600`，历史日志不自动删除。**crontab 中的 `%` 必须写成 `\%`**。查看今天的日志（当天尚未执行时文件不存在）：
@@ -177,6 +202,8 @@ OSS_ENDPOINT=https://oss-cn-shanghai.aliyuncs.com bash ops/transfer.sh download 
 ```bash
 tail -n 80 "/srv/gitlab/backup-work/scheduled-backup-$(date +%Y%m%d).log"
 ```
+
+到点后仍没有当天日志时，先检查 `BACKUP_WORK_DIR` 是否存在、执行用户是否可写，再检查 cron 是否运行；重定向失败可能尚未留下日志，而 `MAILTO=""` 不会发送错误邮件。
 
 `upload complete` 表示该次已上传并校验；只有本地备份成功还不算 OSS 备份成功。详细日志按输出路径查看本次 `operations.log` 或 `transfer.log`。**失败不会主动提醒负责人**，须定期查看日志，并在 OSS 确认最近完整备份，才能发现任务漏执行或整台 ECS 宕机。六小时只是频率，耗时、失败和漏执行均影响恢复点；演练机不发布到生产备份前缀。
 
@@ -188,14 +215,7 @@ tail -n 80 "/srv/gitlab/backup-work/scheduled-backup-$(date +%Y%m%d).log"
 
 ### 场景一：正常重启
 
-先暂停备份计划并等待当前备份、上传任务结束，ECS 另须确认 ESSD 挂载及 UUID。锁不存在只是必要检查，不能代替确认任务已结束；锁检查或 Docker 访问失败时停止排查，不删锁后强行重启。随后先停止 Sidekiq，让 PostgreSQL、Redis 等在工作进程退出前保持可用：
-
-```bash
-docker exec dockseed-gitlab test ! -e /var/opt/gitlab/backups/.dockseed-backup.lock &&
-  docker compose exec -T -e SVWAIT=600 gitlab gitlab-ctl stop sidekiq &&
-  docker compose stop --timeout 600 gitlab &&
-  docker compose start gitlab
-```
+ECS 先核对 ESSD 挂载及 UUID，再按 README 的[日常操作](../README.md#日常操作)执行重启：暂停计划、等待备份及上传结束、检查锁、先停 Sidekiq 再停容器。锁不存在不能代替确认任务已结束；检查失败就停止排查，不删锁后强行重启。
 
 等待 `healthy` 并验证登录。Mac 启动 Docker Desktop 后沿用原卷；异常断电无法保证上述停止顺序。
 
@@ -209,6 +229,7 @@ docker exec dockseed-gitlab test ! -e /var/opt/gitlab/backups/.dockseed-backup.l
 
 ```bash
 umask 077
+export OSSUTIL_CONFIG_FILE=/root/.ossutilconfig OSSUTIL_PROFILE=default # 改为实际配置文件和 profile
 RESTORE_PREFIX=oss://your-private-bucket/gitlab/daily/填写明确的完整备份目录
 cd /opt/dockseed-gitlab && mountpoint -q /srv/gitlab &&
   OSS_ENDPOINT=https://oss-cn-shanghai.aliyuncs.com \
@@ -299,7 +320,9 @@ docker exec -it dockseed-gitlab gitlab-backup restore "BACKUP=$BACKUP_ID" &&
 
 ## 验收与恢复范围
 
-首次上线前必须完成一次独立真实恢复。等待健康后执行以下检查，并验证管理员/普通用户登录、关键仓库已知提交、Clone、测试分支 Push、Issue/MR、权限及 Secrets/CI 变量解密。Registry 须核对关键仓库的标签与摘要并实际拉取镜像，不能只数镜像层文件。实际使用的 CI、Registry、LFS、上传和 Packages 须逐项验收；使用隔离 Runner 和测试目标。
+### 隔离恢复验收
+
+首次上线前必须完成一次独立真实恢复。等待健康后执行以下检查，并验证管理员/普通用户登录、关键仓库已知提交、Issue/MR、权限及 Secrets/CI 变量解密。团队使用 HTTPS 和 SSH 时，两种方式分别完成 Clone、Fetch、测试分支 Push 与回读，最后删除测试分支和临时凭证，不修改业务分支。Registry 须核对关键仓库的标签与摘要并实际拉取镜像，不能只数镜像层文件。实际使用的 CI、Registry、LFS、上传和 Packages 须逐项验收；使用隔离 Runner 和测试目标。
 
 ```bash
 docker compose ps
@@ -309,6 +332,17 @@ docker exec dockseed-gitlab gitlab-rake gitlab:doctor:secrets
 
 备份范围包括仓库、用户、权限、Issue/MR、数据库及实际启用的相关本机文件数据。在线逻辑备份不是全部组件同一瞬间的快照，不保证运行中的 CI Job、Redis 队列原样恢复。Runner 本机配置与 Tunnel 另行恢复；Registry 文件/元数据库及外部对象存储须按实际版本和部署核对，不能默认全部包含在应用 tar 中。[GitLab 备份范围](https://docs.gitlab.com/administration/backup_restore/backup_gitlab/#data-not-included-in-backup)
 
-记录备份目录、版本/平台、恢复耗时和验收结果，单独保留通过的完整样本。验收后确认旧实例与计划已停用，将新机 `.env` 的 `GITLAB_RESTART_POLICY` 改回 `unless-stopped`，执行 `docker compose up -d gitlab` 应用配置；确认健康后才切换域名/Tunnel、按需解除隔离，并显式恢复新机备份计划。演练机不执行生产切换。
+记录备份目录、版本/平台、恢复耗时和验收结果，单独保留通过的完整样本。**演练通过不等于正式入口已可用**；演练机不执行以下切换。
+
+### 正式切换验收
+
+确认旧实例及其备份计划已停用、最终备份已恢复，再逐项完成：
+
+1. 核对并移除仅用于演练的配置，恢复正常网络与 Sidekiq；邮件、Webhook、Runner 等按实际使用情况恢复，未配置的功能不要算作验收通过。
+2. 恢复日常启动方式。由 Docker 管理时，将 `.env` 中 `GITLAB_RESTART_POLICY` 改回 `unless-stopped`，执行 `docker compose up -d gitlab`。若宿主机服务负责挂载检查和自动拉起，则保留 `no` 并按该服务的流程启动，避免 Docker 绕过挂载检查。本工程不提供该服务，须由部署方实现，并在独立验收环境实测 Docker 重启和整机重启后能否自动拉起 GitLab。
+3. 确认健康后切换入口、按需解除隔离；从员工实际使用的网络复测正式地址的登录及 HTTPS/SSH Git 操作，不能用服务器本机检查代替。
+4. 在新机生成、上传并下载校验一份备份，再启用新机的备份计划。记录最近一次成功备份、访问方式和启停方法。
+
+## 本地测试
 
 本地可对 `ops/backup.sh`、`ops/transfer.sh` 及 `tests/` 下三个测试脚本分别运行 `bash -n` 和已安装的 ShellCheck，再执行 `bash tests/backup.sh`、`bash tests/transfer.sh`、`bash tests/startup.sh`；测试仅用临时目录和 Mock；已安装 Compose CLI 时，启动测试另用示例参数验证配置渲染，不连接 Docker daemon、不操作容器或卷。真实 ESSD 挂载、OSS 传输/权限/保留规则和完整 GitLab 恢复仍须在独立环境验证，Mock 或正常停启不能代替恢复演练。
