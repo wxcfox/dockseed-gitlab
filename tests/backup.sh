@@ -109,6 +109,7 @@ case "$1" in
         [[ $MOCK_CASE != registry-probe-failure ]] || exit 35
         case "$MOCK_CASE" in
             registry-invalid-state) printf 'unknown\n' ;;
+            # Match files-only cases before the broader registry-* metadata cases.
             registry-files-*) printf 'true false\n' ;;
             registry-*) printf 'true true\n' ;;
             *) printf 'false false\n' ;;
@@ -144,6 +145,7 @@ case "$1" in
     gitlab-rails)
         [[ $MOCK_CASE != nonzero-keep-time ]] || exit 36
         case "$MOCK_CASE" in
+            # Disabled/files-disabled cases must precede the enabled registry-* fallback.
             registry-disabled|registry-files-disabled) printf 'false\n' ;;
             registry-enabled-invalid) printf 'unknown\n' ;;
             registry-*) printf 'true\n' ;;
@@ -287,7 +289,12 @@ run_case() {
         reject_matches 'backup: success;' "$MOCK_STATE/errors"
         for run in "$BACKUP_WORK_DIR"/dockseed-*; do [[ ! -e $run/LOCAL_COMPLETE ]]; done
         case "$scenario" in
-            unhealthy|low-space|low-work-space|low-backup-space|df-failure|publish-failure|work-create-failure|log-create-failure|nonzero-keep-time|missing-secret|missing-rb|missing-version|ambiguous-packages|git-failure|missing-runtime-config|deployment-archive-failure|registry-probe-failure|registry-invalid-state|registry-missing-env-*|registry-disabled|registry-files-disabled|registry-enabled-invalid)
+            # These failures acquire no lock, except publish-failure after unlock.
+            unhealthy|low-space|low-work-space|low-backup-space|df-failure|publish-failure|\
+            work-create-failure|log-create-failure|nonzero-keep-time|missing-secret|missing-rb|\
+            missing-version|ambiguous-packages|git-failure|missing-runtime-config|\
+            deployment-archive-failure|registry-probe-failure|registry-invalid-state|\
+            registry-missing-env-*|registry-disabled|registry-files-disabled|registry-enabled-invalid)
                 [[ ! -e $lock ]]
                 if [[ $scenario != publish-failure ]]; then reject_matches 'gitlab-backup create' "$MOCK_STATE/commands"; fi ;;
             *) [[ -d $lock ]] ;;
@@ -388,7 +395,11 @@ printf 'PASS: backup / concurrent across work directories\nAll %s backup mock te
 # Execute the production probe against local YAML fixtures, not mocked booleans.
 # Ruby is bundled in GitLab; on the test host this extra check is optional.
 if command -v ruby >/dev/null 2>&1; then
-    probe=$(sed -n '/^registry_state=\$(docker exec/,/^'"'"')/p' "$repo/ops/backup.sh" | sed '1d;$d')
+    probe=$(awk '
+        /# registry-probe:begin$/ {inside=1; next}
+        /# registry-probe:end$/ {exit}
+        inside {print}
+    ' "$repo/ops/backup.sh")
     [[ -n $probe ]]
     probe=${probe//\/var\/opt\/gitlab/$fixture/probe}
     mkdir -p "$fixture/probe/registry" "$fixture/probe/gitlab-rails/shared/registry/docker/registry/lockfiles"

@@ -6,8 +6,8 @@ services:
     container_name: dockseed-gitlab
     platform: ${GITLAB_PLATFORM:-linux/arm64}
     restart: "${GITLAB_RESTART_POLICY:-unless-stopped}"
-    # Every start checks existing data before GitLab can initialize an empty instance.
-    # Only a disposable `compose run --rm` container may explicitly initialize data.
+    # 每次启动先检查已有数据，仅一次性的 compose run --rm 容器可显式初始化。
+    # 初始化检查中的 -L 也会捕获悬空符号链接，不能借此绕过 PG_VERSION 检查。
     command:
       - /bin/bash
       - -ec
@@ -28,11 +28,11 @@ services:
         exec /assets/init-container
     shm_size: "256m"
     environment:
-      # Deliberately not configurable through .env: normal containers must stay protected.
+      # 不允许通过 .env 覆盖，确保正常容器始终执行启动检查。
       GITLAB_ALLOW_INITIALIZATION: "false"
       GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:?请在 .env 中配置初始 root 密码}
-      # GitLab's built-in stale-file cleanup does not match PostgreSQL's
-      # .s.PGSQL.* socket and lock files. Remove them before runit starts.
+      # GitLab 内置清理未匹配 PostgreSQL 的 .s.PGSQL.* socket 和锁文件，
+      # 在 runit 启动前清理这些遗留运行态文件。
       GITLAB_PRE_RECONFIGURE_SCRIPT: |
         rm -f /var/opt/gitlab/postgresql/.s.PGSQL.*
       GITLAB_OMNIBUS_CONFIG: |
@@ -44,7 +44,7 @@ services:
         gitlab_rails['gitlab_shell_ssh_port'] = 2224
         gitlab_rails['time_zone'] = '${GITLAB_TIME_ZONE:-Asia/Shanghai}'
         # Container Registry：仅在 .env 配置了 GITLAB_REGISTRY_EXTERNAL_URL 时启用。
-        # TLS 与主站一样由前置反向代理终止，容器内 Registry nginx 只监听明文 5050。
+        # 容器内监听明文 5050；HTTPS 由前置代理终止 TLS，可信内网也可用 HTTP 直连。
         registry_url = '${GITLAB_REGISTRY_EXTERNAL_URL:-}'
         unless registry_url.empty?
           registry_external_url registry_url
@@ -53,13 +53,16 @@ services:
           registry_nginx['listen_https'] = false
           # 上传重定向须与对外地址一致，兼容 HTTPS 代理和可信内网 HTTP 直连。
           registry_https = registry_url.start_with?('https://')
-          registry_nginx['proxy_set_headers'] = { "X-Forwarded-Proto" => registry_https ? "https" : "http", "X-Forwarded-Ssl" => registry_https ? "on" : "off" }
+          registry_nginx['proxy_set_headers'] = {
+            "X-Forwarded-Proto" => registry_https ? "https" : "http",
+            "X-Forwarded-Ssl" => registry_https ? "on" : "off"
+          }
         end
     ports:
       - "${GITLAB_BIND_ADDR:-127.0.0.1}:8929:80"
       - "${GITLAB_BIND_ADDR:-127.0.0.1}:2224:22"
-      # Registry 端口；未启用 Registry 时不发布固定宿主机端口，避免占用。
-      # 绑定地址默认 127.0.0.1，仅在 Runner 需要绕过代理直连推送时改为其可达的内网地址。
+      # 未启用 Registry 时仍映射到绑定地址上的随机端口，容器内无服务监听。
+      # 绑定地址默认 127.0.0.1；Runner 直连或内网 HTTP Registry 可改为可达的内网地址。
       - target: 5050
         host_ip: ${GITLAB_REGISTRY_BIND_ADDR:-127.0.0.1}
         published: "${GITLAB_REGISTRY_EXTERNAL_URL:+${GITLAB_REGISTRY_PORT:-5050}}"

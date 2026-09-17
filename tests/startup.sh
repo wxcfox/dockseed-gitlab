@@ -58,6 +58,7 @@ run_case() {
     passed=$((passed + 1))
     printf 'PASS: startup / %s\n' "$name"
 }
+# name secrets PG_VERSION mode expected
 run_case existing-data present present "$normal_mode" pass
 run_case empty-directories missing missing "$normal_mode" fail
 run_case missing-secrets missing present "$normal_mode" fail

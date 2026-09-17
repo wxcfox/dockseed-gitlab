@@ -3,6 +3,7 @@
 set -euo pipefail
 umask 077
 export LC_ALL=C
+# fd 3 sends progress/errors to the terminal; fd 4 only emits the final directory.
 exec 3>&2 4>&1
 
 fail() { printf 'transfer: %s\n' "$*" >&3; exit 1; }
@@ -10,10 +11,11 @@ log() { printf '%s transfer: %s\n' "$(date -u +%FT%TZ)" "$*" >&3; }
 usage() { fail 'usage: transfer.sh upload /backup/directory [--remove-local] | download oss://bucket/prefix/backup-id /new/directory'; }
 action=${1:-}
 remove_local=false
+# marker is LOCAL_COMPLETE for uploads, a temporary downloaded COMPLETE for downloads.
 case "$action" in
     upload)
         [[ $# = 2 || ( $# = 3 && $3 = --remove-local ) ]] || usage
-        [[ $# = 2 ]] || remove_local=true
+        if [[ $# = 3 ]]; then remove_local=true; fi
         dir=$2
         [[ $dir = /* && -d $dir && ! -L $dir ]] || fail 'upload directory must be an existing absolute directory, not a symlink'
         dir=$(cd "$dir" && pwd -P)
@@ -64,21 +66,21 @@ log "$action $id; private details: $dir/transfer.log"
 files=("${id}_gitlab_backup.tar" config.tar deployment.tar manifest.txt)
 
 verify_package() {
-    local file expected actual digest
+    local file marker_id marker_digest checksum_digest expected_files listed_files
     for file in "${files[@]}" SHA256SUMS; do
         [[ -f $dir/$file && -s $dir/$file && ! -L $dir/$file ]] || fail "required file missing or symlink: $file"
     done
     [[ -f $marker && -s $marker && ! -L $marker ]] || fail 'completion marker missing or symlink'
-    actual=$(sed -n 's/^backup_id=//p' "$marker")
-    [[ $actual = "$id" ]] || fail 'completion marker backup ID mismatch'
-    expected=$(sed -n 's/^checksums_sha256=//p' "$marker")
-    [[ $expected =~ ^[a-f0-9]{64}$ ]] || fail 'invalid SHA256SUMS hash in completion marker'
-    digest=$("${sha[@]}" "$dir/SHA256SUMS" | awk '{print $1}')
-    [[ $digest = "$expected" ]] || fail 'SHA256SUMS differs from completion marker'
+    marker_id=$(sed -n 's/^backup_id=//p' "$marker")
+    [[ $marker_id = "$id" ]] || fail 'completion marker backup ID mismatch'
+    marker_digest=$(sed -n 's/^checksums_sha256=//p' "$marker")
+    [[ $marker_digest =~ ^[a-f0-9]{64}$ ]] || fail 'invalid SHA256SUMS hash in completion marker'
+    checksum_digest=$("${sha[@]}" "$dir/SHA256SUMS" | awk '{print $1}')
+    [[ $checksum_digest = "$marker_digest" ]] || fail 'SHA256SUMS differs from completion marker'
     # Only these four relative filenames may be read by the checksum command.
-    expected=$(printf '  %s\n' "${files[@]}")
-    actual=$(sed -E 's/^[a-f0-9]{64}//' "$dir/SHA256SUMS")
-    [[ $actual = "$expected" ]] || fail 'SHA256SUMS must list exactly the four expected files'
+    expected_files=$(printf '  %s\n' "${files[@]}")
+    listed_files=$(sed -E 's/^[a-f0-9]{64}//' "$dir/SHA256SUMS")
+    [[ $listed_files = "$expected_files" ]] || fail 'SHA256SUMS must list exactly the four expected files'
     grep -Fx "backup_id=$id" "$dir/manifest.txt" >/dev/null || fail 'manifest backup ID mismatch'
     (cd "$dir" && "${sha[@]}" -c SHA256SUMS)
 }
@@ -92,7 +94,7 @@ copy_object() {
 crc64() {
     local value
     value=$(ossutil hash crc64 "$1" --endpoint "$OSS_ENDPOINT" --output-format raw |
-        awk '$1 ~ /^[0-9]+$/ {print $1}') || return 1
+        awk '$1 ~ /^[0-9]+$/ {print $1}') || fail "cannot compute CRC64: $1"
     [[ $value =~ ^[0-9]+$ ]] || fail 'ossutil did not return a CRC64 value'
     printf '%s\n' "$value"
 }
@@ -109,10 +111,11 @@ upload_object() {
 if [[ $action = upload ]]; then
     verify_package
     for file in "${files[@]}" SHA256SUMS; do upload_object "$dir/$file" "$remote/$file"; done
+    # Confirm local files did not change during upload before publishing COMPLETE.
     verify_package
     # Stable bytes allow retrying after a lost response. COMPLETE is always last.
     upload_object "$marker" "$remote/COMPLETE"
-    if "$remove_local"; then
+    if [[ $remove_local = true ]]; then
         # Invalidate local readiness first; delete only this package's known files.
         rm -- "$marker"
         for file in "${files[@]}" SHA256SUMS; do rm -- "$dir/$file"; done
@@ -122,7 +125,8 @@ else
     # not integrity; the downloaded package must still pass SHA-256 verification.
     log 'checking download size and free space'
     object_path=${remote#oss://}
-    required_kb=1048576
+    headroom_kb=1048576 # 1 GiB
+    required_kb=$headroom_kb
     for file in COMPLETE SHA256SUMS "${files[@]}"; do
         bytes=$(ossutil api head-object --bucket "${object_path%%/*}" --key "${object_path#*/}/$file" \
             --endpoint "$OSS_ENDPOINT" --output-format json \
@@ -139,6 +143,8 @@ else
     log 'verifying downloaded package (SHA-256)'
     verify_package
 fi
+# Unlock before publishing local readiness or reporting success; unlock failure
+# must still fail the transfer. The EXIT trap handles earlier failures instead.
 rmdir "$dir/.transfer.lock"
 trap - EXIT
 if [[ $action = download ]]; then

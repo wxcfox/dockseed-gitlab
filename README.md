@@ -168,7 +168,7 @@ build:
 docker compose up -d
 ```
 
-Registry 进程、CI 预定义变量和固定的宿主机端口发布随之消失。已推送的镜像数据仍留在 `dockseed-gitlab-data` 卷中，重新启用后可继续使用。关闭后若仍留有 Registry 配置或数据标记，备份脚本会在加锁前拒绝执行；请重新启用 Registry 再备份，避免遗漏历史镜像。脚本不提供跳过 Registry 数据的开关。需要释放空间时使用 GitLab 官方清理机制，不直接删除镜像存储目录。前置代理侧记得同步删除 Registry 子域名的转发。
+Registry 进程、CI 预定义变量和固定宿主机端口随之停用；5050 映射仍会在绑定地址上分配随机宿主机端口，但容器内无服务监听。已推送的镜像数据仍留在 `dockseed-gitlab-data` 卷中，重新启用后可继续使用。关闭后若仍留有 Registry 配置或数据标记，备份脚本会在加锁前拒绝执行；请重新启用 Registry 再备份，避免遗漏历史镜像。脚本不提供跳过 Registry 数据的开关。需要释放空间时使用 GitLab 官方清理机制，不直接删除镜像存储目录。前置代理侧记得同步删除 Registry 子域名的转发。
 
 ## 日常操作
 
@@ -196,7 +196,7 @@ docker compose ps
 docker compose logs -f --tail=200 gitlab
 ```
 
-Mac 重启后，先启动 Docker Desktop，再在本目录运行 `docker compose up -d`。
+Mac 重启后，先启动 Docker Desktop，用 `docker compose ps -a gitlab` 查看状态；已运行时等待 `healthy`，已有容器停止时执行 `docker compose start gitlab`。容器不存在才按「正常启动」创建；配置有变化时按上述重建步骤处理，`up` 可能重建容器。
 
 计划停止时先等待 Sidekiq 退出，避免其仍在工作时 PostgreSQL、Redis 已停止；前一步失败时不要继续停容器。
 
@@ -229,7 +229,7 @@ GitLab 使用 Docker 原生命名卷：
 - `dockseed-gitlab-logs` → `/var/log/gitlab`：日志
 - `dockseed-gitlab-data` → `/var/opt/gitlab`：仓库、PostgreSQL、Redis、上传文件及应用数据
 
-命名卷由 Docker 的 Linux VM 管理，可保留 GitLab 所需的 Unix 所有权、权限和 socket 语义。不要把运行中的 `/var/opt/gitlab` 直接压缩后解包到 macOS bind mount；机器迁移应使用 GitLab 官方 backup/restore 流程，并单独迁移 `/etc/gitlab`。
+Mac 上的命名卷由 Docker Desktop 的 Linux VM 管理，可保留 GitLab 所需的 Unix 所有权、权限和 socket 语义；ECS 按[存储说明](docs/recovery.md#存储与首次部署)将三个卷绑定到 `/srv/gitlab` 下的 ESSD 目录。不要把运行中的 `/var/opt/gitlab` 直接压缩后解包到 macOS bind mount；机器迁移应使用 GitLab 官方 backup/restore 流程，并单独迁移 `/etc/gitlab`。
 
 容器可以安全重建；不要删除上述三个命名卷。
 

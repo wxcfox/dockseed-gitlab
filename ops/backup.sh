@@ -3,10 +3,13 @@
 set -euo pipefail
 umask 077
 export LC_ALL=C
+# fd 3 sends progress/errors to the terminal; fd 4 only emits the final directory.
 exec 3>&2 4>&1
 
 fail() { printf 'backup: %s\n' "$*" >&3; exit 1; }
 log() { printf '%s backup: %s\n' "$(date -u +%FT%TZ)" "$*" >&3; }
+
+# 1. Parameters and dependencies
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 for tool in docker git tar gzip; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing dependency: $tool"
@@ -30,26 +33,28 @@ compose=(docker compose --project-directory "$repo" --env-file "$repo/.env" -f "
 work=$(cd "$BACKUP_WORK_DIR" && pwd -P)
 [[ -w $work ]] || fail 'BACKUP_WORK_DIR must be writable by the current user'
 
+# 2. Preflight (no lock acquired)
+container_backups=/var/opt/gitlab/backups
+headroom_kb=1048576 # 1 GiB
 cid=$("${compose[@]}" ps -q gitlab)
 [[ $cid =~ ^[a-f0-9]+$ ]] || fail 'expected exactly one running Compose gitlab container'
 [[ $(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid") = 'true healthy' ]] || fail 'GitLab must be running and healthy'
-# Allow for GitLab staging, archives and a host copy, plus 1 GiB headroom.
-required_kb=$((4 * BACKUP_ESTIMATE_KB + 1048576))
 check_free() {
-    local available=$1 label=$2
+    local available=$1 required=$2 label=$3
     [[ $available =~ ^[0-9]+$ ]] || fail "cannot read free space: $label"
-    ((available >= required_kb)) || fail "insufficient space at $label: $(awk -v need="$required_kb" -v free="$available" 'BEGIN {printf "need %.1f GiB, available %.1f GiB", need/1048576, free/1048576}')"
+    ((available >= required)) || fail "insufficient space at $label: $(awk -v need="$required" -v free="$available" 'BEGIN {printf "need %.1f GiB, available %.1f GiB", need/1048576, free/1048576}')"
 }
+# Allow for GitLab staging, archives and a host copy, plus headroom.
 available=$(df -Pk "$work" | awk 'END {print $4}')
-check_free "$available" 'host work directory'
-available=$(docker exec "$cid" df -Pk /var/opt/gitlab/backups | awk 'END {print $4}')
-check_free "$available" 'container /var/opt/gitlab/backups'
+check_free "$available" "$((4 * BACKUP_ESTIMATE_KB + headroom_kb))" 'host work directory'
+available=$(docker exec "$cid" df -Pk "$container_backups" | awk 'END {print $4}')
+check_free "$available" "$((4 * BACKUP_ESTIMATE_KB + headroom_kb))" "container $container_backups"
 
-# The data-volume lock covers all checkouts. A disconnected docker exec may
-# still be backing up, so failures retain the lock until an operator checks it.
-container_backups=/var/opt/gitlab/backups
+# The data-volume lock covers all checkouts. Check it now to avoid extra diagnostic
+# directories, then acquire it atomically with mkdir after preflight. Failures retain
+# it for manual inspection: a disconnected docker exec may still be backing up.
+# Successful cleanup releases it with rmdir before publishing LOCAL_COMPLETE.
 lock=$container_backups/.dockseed-backup.lock
-# Reject a known lock before creating another local diagnostics directory.
 docker exec "$cid" test ! -e "$lock" || fail "backup already running or previous failure retained; inspect $lock (docs/recovery.md)"
 run_id=dockseed-$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 run=$work/$run_id
@@ -71,7 +76,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 log "preflight $run_id; private details: $log_file"
 
-# Require disabled GitLab retention so the command cannot prune historical files.
+# Start Rails once: validate backup path/retention and report Registry enablement.
+# Keep this Ruby backup path identical to container_backups above.
 registry_enabled=$(docker exec "$cid" gitlab-rails runner \
     'abort "backup_path must be /var/opt/gitlab/backups" unless Gitlab.config.backup.path.to_s == "/var/opt/gitlab/backups"
      abort "backup keep_time must be zero" unless Gitlab.config.backup.keep_time.to_i == 0
@@ -82,20 +88,21 @@ docker exec "$cid" test -s /etc/gitlab/gitlab.rb
 # Read only two booleans using GitLab's bundled Ruby; never print registry credentials.
 # The marker also protects retained metadata when Registry has been disabled.
 registry_state=$(docker exec "$cid" /opt/gitlab/embedded/bin/ruby -ryaml -e '
+    # registry-probe:begin
     path = "/var/opt/gitlab/registry/config.yml"
     config = File.file?(path) ? YAML.load_file(path) : {}
+    # GitLab 19.3 Omnibus defaults to "prefer"; it is not a boolean.
     database = ["prefer", "true", true].include?(config.dig("database", "enabled")) ||
         File.exist?("/var/opt/gitlab/gitlab-rails/shared/registry/docker/registry/lockfiles/database-in-use")
     puts "#{File.file?(path) || database} #{database}"
+    # registry-probe:end
 ')
 case "$registry_state" in
     'true true'|'true false'|'false false') ;;
     *) fail 'cannot determine Registry files and metadata database usage' ;;
 esac
-read -r registry_files registry_database <<< "$registry_state"
-if [[ $registry_enabled = true ]]; then
-    registry_files=true
-elif [[ $registry_files = true ]]; then
+read -r registry_leftovers registry_database <<< "$registry_state"
+if [[ $registry_enabled = false && $registry_leftovers = true ]]; then
     fail 'Registry is disabled but retained configuration/data exists; re-enable Registry before backing up its data (see README: 关闭 Registry)'
 fi
 if [[ $registry_database = true ]]; then
@@ -129,7 +136,7 @@ for file in "${deployment[@]}"; do
 done
 tar -cf "$run/deployment.tar" -C "$repo" "${deployment[@]}" -C "$run" runtime-omnibus.rb
 
-# Acquire atomically after preflight; another task may have won since the early check.
+# 3. Acquire the lock and create backups
 docker exec "$cid" mkdir -m 700 "$lock" >/dev/null 2>&1 || fail "backup already running, previous failure retained, or backup directory unavailable; inspect $lock (docs/recovery.md)"
 log "started $run_id"
 app_file=${run_id}_gitlab_backup.tar
@@ -137,6 +144,8 @@ container_config=$container_backups/$run_id-config
 docker exec "$cid" test ! -e "$container_backups/$app_file"
 docker exec "$cid" mkdir -m 700 "$container_config"
 log 'creating official GitLab application backup'
+# Clear incremental, partial-repository, compression and copy-strategy overrides
+# so GitLab produces a complete backup in its default format.
 docker exec "$cid" env -u INCREMENTAL -u PREVIOUS_BACKUP -u REPOSITORIES_SERVER_SIDE \
     -u REPOSITORIES_PATHS -u REPOSITORIES_STORAGES -u SKIP_REPOSITORIES_PATHS \
     -u COMPRESS_CMD -u DECOMPRESS_CMD -u STRATEGY -u GZIP_RSYNCABLE \
@@ -152,14 +161,14 @@ config_file=$(docker exec "$cid" sh -c '
 ' sh "$container_config")
 [[ $config_file =~ ^gitlab_config_[0-9_]+\.tar$ ]] || fail 'cannot identify this task configuration archive'
 
+# 4. Copy and validate archives
 # Use actual archive sizes for the copy; an estimate is not a hard size limit.
 app_kb=$(docker exec "$cid" du -k "$container_backups/$app_file" | awk '{print $1}')
 config_kb=$(docker exec "$cid" du -k "$container_config/$config_file" | awk '{print $1}')
 [[ $app_kb =~ ^[0-9]+$ && $config_kb =~ ^[0-9]+$ ]] || fail 'cannot measure backup files'
 ((app_kb + config_kb <= BACKUP_ESTIMATE_KB)) || log 'WARNING: archives exceeded BACKUP_ESTIMATE_KB; checking actual space; increase the budget for future backups'
-required_kb=$((app_kb + config_kb + 1048576))
 available=$(df -Pk "$work" | awk 'END {print $4}')
-check_free "$available" 'host before copy'
+check_free "$available" "$((app_kb + config_kb + headroom_kb))" 'host before copy'
 docker cp "$cid:$container_backups/$app_file" "$run/$app_file"
 docker cp "$cid:$container_config/$config_file" "$run/config.tar"
 chmod 600 "$run/$app_file" "$run/config.tar"
@@ -177,7 +186,7 @@ databases=(database)
 if [[ $registry_database = true ]]; then
     databases+=(registry_database)
 fi
-if [[ $registry_files = true ]]; then
+if [[ $registry_enabled = true ]]; then
     grep -Eq '^(\./)?registry\.tar\.gz$' "$run/application-members.txt" || fail 'application archive missing Registry files; keep Registry enabled when backing up its data'
 fi
 for database in "${databases[@]}"; do
@@ -191,14 +200,18 @@ metadata_member=$(grep -Ex '(\./)?backup_information.yml' "$run/application-memb
 tar -xOf "$run/$app_file" "$metadata_member" > "$run/backup_information.yml"
 grep -Eq '^:?(backup_created_at|backup_id):' "$run/backup_information.yml" || fail 'missing backup identity/time metadata'
 grep -Eq "^:?gitlab_version: ['\"]?${version//./[.]}['\"]?$" "$run/backup_information.yml" || fail 'application archive version mismatch'
-# Only remote upload may be skipped; fail if an inherited container environment narrowed the backup.
+# Only remote upload may be skipped.
 grep -Eq "^:?skipped: ['\"]?remote['\"]?$" "$run/backup_information.yml" || fail 'unexpected skipped backup components'
-for file in "$app_file" config.tar; do
-    if [[ $file = config.tar ]]; then source=$container_config/$config_file; else source=$container_backups/$app_file; fi
+verify_copy() {
+    local source=$1 target=$2 source_hash host_hash
     source_hash=$(docker exec "$cid" sha256sum "$source" | awk '{print $1}')
-    host_hash=$("${sha[@]}" "$run/$file" | awk '{print $1}')
-    [[ $source_hash = "$host_hash" ]] || fail "container-to-host checksum mismatch: $file"
-done
+    host_hash=$("${sha[@]}" "$target" | awk '{print $1}')
+    [[ $source_hash = "$host_hash" ]] || fail "container-to-host checksum mismatch: ${target##*/}"
+}
+verify_copy "$container_backups/$app_file" "$run/$app_file"
+verify_copy "$container_config/$config_file" "$run/config.tar"
+
+# 5. Prepare completion metadata, clean up and publish
 cat > "$run/manifest.txt" <<MANIFEST
 format=1
 backup_id=$run_id
