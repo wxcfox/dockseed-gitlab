@@ -8,7 +8,7 @@ fixture=$(cd "$fixture" && pwd -P)
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/bin" "$fixture/project/ops" "$fixture/project/docs"
 cp "$repo/ops/backup.sh" "$fixture/project/ops/"
-for file in docker-compose.yml README.md ops/transfer.sh docs/recovery.md; do
+for file in docker-compose.yml README.md ops/transfer.sh docs/recovery.md docs/email.md; do
     printf 'offline deployment fixture\n' > "$fixture/project/$file"
 done
 # Literal shell syntax creates a sentinel if deployment .env is accidentally sourced.
@@ -105,12 +105,12 @@ if [[ $1 = env ]]; then
 fi
 case "$1" in
     /opt/gitlab/embedded/bin/ruby)
-        [[ $2 = -ryaml && $3 = -e && $4 = *database-in-use* ]] || bad "$@"
+        [[ $2 = -ryaml && $3 = -e && $4 = *database-in-use* && $4 = *filesystem-in-use* ]] || bad "$@"
         [[ $MOCK_CASE != registry-probe-failure ]] || exit 35
         case "$MOCK_CASE" in
             registry-invalid-state) printf 'unknown\n' ;;
             # Match files-only cases before the broader registry-* metadata cases.
-            registry-files-*) printf 'true false\n' ;;
+            registry-files-*|registry-prefer-fallback) printf 'true false\n' ;;
             registry-*) printf 'true true\n' ;;
             *) printf 'false false\n' ;;
         esac ;;
@@ -181,7 +181,7 @@ case "$1" in
         fi
         case "$MOCK_CASE" in
             registry-*)
-                if [[ $MOCK_CASE != registry-missing-dump && $MOCK_CASE != registry-files-* ]]; then
+                if [[ $MOCK_CASE != registry-missing-dump && $MOCK_CASE != registry-files-* && $MOCK_CASE != registry-prefer-fallback ]]; then
                     printf 'fixture registry metadata dump\n' | gzip > "$MOCK_STATE/app/db/registry_database.sql.gz"
                 fi
                 if [[ $MOCK_CASE = registry-empty-dump ]]; then
@@ -264,7 +264,7 @@ local_valid() {
     grep -qx "checksums_sha256=$checksum" "$payload/LOCAL_COMPLETE"
     grep -qx "backup_id=${payload##*/}" "$payload/LOCAL_COMPLETE"
     tar -tf "$payload/deployment.tar" > "$MOCK_STATE/deployment-members"
-    for member in .env README.md runtime-omnibus.rb ops/backup.sh ops/transfer.sh docs/recovery.md; do
+    for member in .env README.md runtime-omnibus.rb ops/backup.sh ops/transfer.sh docs/recovery.md docs/email.md; do
         grep -qx "$member" "$MOCK_STATE/deployment-members"
     done
     [[ $(find "$payload" -type f | wc -l | tr -d ' ') = 7 && -s $payload/operations.log ]]
@@ -322,6 +322,9 @@ grep -qx 'registry_database=false' "$(cat "$MOCK_STATE/output")/manifest.txt"
 run_case registry-success pass
 grep -qx 'registry_database=true' "$(cat "$MOCK_STATE/output")/manifest.txt"
 run_case registry-files-success pass
+grep -qx 'registry_database=false' "$(cat "$MOCK_STATE/output")/manifest.txt"
+reject_matches 'test -s /opt/gitlab/etc/gitlab-backup/env/' "$MOCK_STATE/commands"
+run_case registry-prefer-fallback pass
 grep -qx 'registry_database=false' "$(cat "$MOCK_STATE/output")/manifest.txt"
 reject_matches 'test -s /opt/gitlab/etc/gitlab-backup/env/' "$MOCK_STATE/commands"
 run_case registry-files-missing
@@ -411,6 +414,18 @@ if command -v ruby >/dev/null 2>&1; then
         [[ $(ruby -ryaml -e "$probe") = "$expected" ]]
         printf 'PASS: Registry probe / enabled=%s\n' "$enabled"
     done
+    lock_dir="$fixture/probe/gitlab-rails/shared/registry/docker/registry/lockfiles"
+    printf 'database:\n  enabled: "prefer"\n' > "$config"
+    : > "$lock_dir/filesystem-in-use"
+    [[ $(ruby -ryaml -e "$probe") = 'true false' ]]
+    rm "$lock_dir/filesystem-in-use"
+    : > "$lock_dir/database-in-use"
+    [[ $(ruby -ryaml -e "$probe") = 'true true' ]]
+    : > "$lock_dir/filesystem-in-use"
+    if ruby -ryaml -e "$probe" > /dev/null 2>&1; then
+        printf 'FAIL: conflicting Registry metadata lockfiles accepted\n' >&2; exit 1
+    fi
+    rm "$lock_dir/filesystem-in-use" "$lock_dir/database-in-use"
     rm "$config"
     [[ $(ruby -ryaml -e "$probe") = 'false false' ]]
     : > "$fixture/probe/gitlab-rails/shared/registry/docker/registry/lockfiles/database-in-use"

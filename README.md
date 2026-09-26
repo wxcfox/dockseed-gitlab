@@ -7,13 +7,13 @@
 - Mac：Docker Desktop（建议至少分配 6 GB 内存）与 Docker Compose v2
 - ECS：Docker Engine、Compose v2，独立数据盘按[存储说明](docs/recovery.md#存储与首次部署)挂载
 
-Apple Silicon 使用 `linux/arm64`，Intel Mac 使用 `linux/amd64`。
+默认镜像标签提供 `linux/amd64` 和 `linux/arm64`；未指定平台时，Docker 默认选择与运行环境匹配的变体。更换标签时须确认目标架构受支持。
 
 Mac 无需 ESSD，继续使用 Docker Desktop 管理的三个普通命名卷。首次空卷部署按下文显式初始化；已有数据不需要额外挂载或重新初始化。
 
 ## 配置与启动
 
-以下是 **Mac 全新部署**步骤；ECS 使用[迁移与恢复说明](docs/recovery.md)，不要先创建普通命名卷。已有 Mac 数据迁往 ECS 属于恢复流程，不能直接在 ECS 上初始化后当作迁移完成。
+以下是 **Mac 全新部署**步骤；Linux/ECS 首次部署先看[存储与首次部署](docs/recovery.md#存储与首次部署)。已有 Mac 数据迁往 ECS 属于[恢复流程](docs/recovery.md#从-mac-迁往-ecs-的顺序)，不能直接在 ECS 上初始化后当作迁移完成。
 
 复制配置模板并按注释填写 `.env`：
 
@@ -73,19 +73,22 @@ docker compose ps
 在 `.env` 中设置以下参数，Compose 无需修改（示例 IP 须替换）：
 
 ```dotenv
-GITLAB_PLATFORM=linux/amd64
 GITLAB_EXTERNAL_URL=http://203.0.113.10:8929
 GITLAB_SSH_HOST=203.0.113.10
 GITLAB_BIND_ADDR=0.0.0.0
 ```
 
-`GITLAB_EXTERNAL_URL` 决定页面及 HTTP Clone 地址，`GITLAB_SSH_HOST` 决定 SSH Clone 地址，`GITLAB_BIND_ADDR` 决定监听网卡。ECS 安全组只向需要访问的来源放行 TCP `8929` 和 `2224`，临时验收时限制为管理员出口 IP。HTTP 会明文传输密码和会话，长期使用应配置 HTTPS。恢复验收前保持入口隔离。
+`GITLAB_EXTERNAL_URL` 决定页面及 HTTP Clone 地址，`GITLAB_SSH_HOST` 决定 SSH Clone 地址，`GITLAB_BIND_ADDR` 决定监听网卡。若持久化的 `gitlab.rb` 设置了同名 GitLab 配置，以该文件为准。ECS 安全组只向需要访问的来源放行 TCP `8929` 和 `2224`，临时验收时限制为管理员出口 IP。HTTP 会明文传输密码和会话，长期使用应配置 HTTPS。恢复验收前保持入口隔离。
 
 Mac 不配置这些参数时仍只监听 `127.0.0.1`。使用 Tunnel 时由 `dockseed-cloudflared` 转发本机 8929 端口，在该工程中执行：
 
 ```bash
 ./start.sh add gitlab 8929
 ```
+
+## 邮件（可选）
+
+本工程无需邮件配置即可运行。需要注册验证、密码重置或通知邮件时，按[可选邮件配置](docs/email.md)在各实例持久化的 `gitlab.rb` 中启用 SMTP；无需改 Compose 或 GitLab 源码。不要把邮箱密码写入本工程的 `.env` 或提交到仓库。
 
 ## Container Registry
 

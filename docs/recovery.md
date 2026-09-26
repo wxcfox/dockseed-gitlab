@@ -26,7 +26,7 @@ chmod 600 .env
 
 更新工程前检查 `git status` 和 `git diff`；工作区干净时使用 `git pull --ff-only`。有本地改动时先核对并保留，不强制覆盖。更新工程不会自动升级或重启 GitLab。
 
-Web/SSH 的 IP 访问配置见 [README](../README.md#ecs-通过-ip-访问)。目标镜像必须与备份同精确版本和 CE/EE 类型，平台按目标机器选择。
+Web/SSH 的 IP 访问配置见 [README](../README.md#ecs-通过-ip-访问)。目标镜像必须与备份同精确版本和 CE/EE 类型，并支持目标机器的架构。
 
 ## 存储与首次部署
 
@@ -55,7 +55,7 @@ docker volume create --driver local --opt type=none --opt o=bind --opt device=/s
 docker volume create --driver local --opt type=none --opt o=bind --opt device=/srv/gitlab/data dockseed-gitlab-data
 ```
 
-确认三个卷均为 local driver，选项分别为 `type=none`、`o=bind` 和对应目录的 `device`，再按 README 配置 `.env`（权限 `0600`，只供 Compose 解析，不能 `source`）。用 `uname -m` 确认 ECS 架构：`x86_64` 设置 `GITLAB_PLATFORM=linux/amd64`，`aarch64` 设置 `GITLAB_PLATFORM=linux/arm64`。
+确认三个卷均为 local driver，选项分别为 `type=none`、`o=bind` 和对应目录的 `device`，再按 README 配置 `.env`（权限 `0600`，只供 Compose 解析，不能 `source`）。确认所选镜像标签支持 ECS 架构；未指定平台时，Docker 默认选择匹配的变体。
 
 首次 ECS 初始化先按 README 的[一次性初始化](../README.md#一次性初始化)确认正常容器不存在或已停止，包括曾因空卷反复重启的容器；再执行下条命令，等待 `healthy` **及本次启动的 `gitlab Reconfigured!` 日志**并停止初始化容器，成功后才正常启动。恢复场景先还原配置；已有 `PG_VERSION` 时初始化会被拒绝，不得删除它绕过检查，初始化期间不得启动正常容器。
 
@@ -101,7 +101,7 @@ export OSSUTIL_PROFILE=default
 
 **镜像层文件和元数据库必须一起备份。** 仅有 `registry.tar.gz` 可能恢复不出仓库标签。以下适用于本工程当前的单机 GitLab 19.3；未使用元数据库的旧版本仍按其官方说明处理。
 
-在容器 `/etc/gitlab/gitlab.rb` 中配置以下内容（ECS 对应 `/srv/gitlab/config/gitlab.rb`，Mac 可用 `docker exec -it dockseed-gitlab editor /etc/gitlab/gitlab.rb` 编辑）：
+在容器 `/etc/gitlab/gitlab.rb` 中配置以下内容（ECS 对应 `/srv/gitlab/config/gitlab.rb`）：
 
 ```ruby
 gitlab_rails['backup_role'] = true
@@ -111,7 +111,7 @@ gitlab_rails['restore_registry_password'] = '<另一个独立随机密码>'
 
 两个密码各生成一次并持久保存；已有设置不重复追加、不在定时任务里轮换。使用默认官方角色 `registry_backup` 和 `registry_restore`，不要拿 Registry 业务账号代替。暂停备份、等待当前任务结束，在维护窗口执行 `docker exec dockseed-gitlab gitlab-ctl reconfigure`，成功后再备份。这些设置与 Secrets 一起进入 `config.tar`，无需再新增环境变量或独立凭证文件。[官方配置](https://docs.gitlab.com/omnibus/settings/backups/#container-registry-metadata-database-backup-credentials)
 
-脚本读取本机 Registry 配置及数据标记，识别 `prefer`、字符串 `true` 和布尔 `true`；使用元数据库时，缺备份/恢复角色配置就提前失败。所有备份都校验主数据库转储，使用元数据库时另校验 `db/registry_database.sql.gz`。检测到 Registry 配置或数据标记时，无论是否使用元数据库，都要求包含 `registry.tar.gz`；否则不生成 `LOCAL_COMPLETE`。数据库转储会完整读取并解压校验，增加相应磁盘读取和 CPU 开销。清单记录 `registry_database=true/false`；旧清单无此字段时不能推断为未启用，应检查归档及原实例。
+脚本读取本机 Registry 配置及后端标记；`prefer` 模式若已回退到文件元数据，不要求元数据库凭据。使用元数据库时，缺备份/恢复角色配置就提前失败。所有备份都校验主数据库转储，使用元数据库时另校验 `db/registry_database.sql.gz`。检测到 Registry 配置或数据标记时，无论是否使用元数据库，都要求包含 `registry.tar.gz`；否则不生成 `LOCAL_COMPLETE`。数据库转储会完整读取并解压校验，增加相应磁盘读取和 CPU 开销。清单记录 `registry_database=true/false`；旧清单无此字段时不能推断为未启用，应检查归档及原实例。
 
 如果旧备份缺元数据库，且原机仍可用，应先补好配置再生成完整备份；原机和盘均已丢失时，不能靠镜像层文件承诺找回标签。恢复前还原含角色设置的 `gitlab.rb`，初始化会重新创建凭证，官方 `gitlab-backup restore` 负责恢复元数据库；不要另写 PostgreSQL 数据目录复制流程。
 
@@ -133,7 +133,7 @@ BACKUP_WORK_DIR="$HOME/gitlab-backup-work" BACKUP_ESTIMATE_KB=20971520 bash ops/
 
 只有成功时 stdout 才输出完整目录的绝对路径，阶段日志走 stderr。看到 `success; local backup ready` 后保存最后一行路径，供上传使用；不必重新执行备份。完整目录含四个备份文件：应用原始 ID 的 `_gitlab_backup.tar`、`config.tar`、`deployment.tar`、`manifest.txt`，以及 `SHA256SUMS`、`LOCAL_COMPLETE` 和私有 `operations.log`。成功后仅清理本次容器临时备份并释放锁，本地备份保留。
 
-配置包必须含 gitlab.rb 与 Secrets；部署包仅包含 `docker-compose.yml`、真实 `.env`、实际注入的 `runtime-omnibus.rb`、README、两个脚本和恢复说明。清单记录精确 GitLab 版本、CE/EE、镜像标识/平台、备份 ID/文件名/时间及工程提交。`.env` 不能作为 Shell 脚本 `source`。
+配置包必须含 gitlab.rb 与 Secrets；部署包仅包含 `docker-compose.yml`、真实 `.env`、实际注入的 `runtime-omnibus.rb`、README、两个脚本、恢复说明和可选邮件说明。清单记录精确 GitLab 版本、CE/EE、镜像标识/平台、备份 ID/文件名/时间及工程提交。`.env` 不能作为 Shell 脚本 `source`。
 
 **这不是整台服务器的备份。** `compose.override.yml`、其他 Compose 覆盖文件、systemd/cron、磁盘挂载、反向代理、DNS、TLS 和网络配置均不在部署包中；`runtime-omnibus.rb` 也不包含端口、网络或卷的覆盖设置。使用这些配置时，另存环境说明及必要文件，并确保 GitLab 不可用时仍可取得；凭据另行保护，不提交到本工程。
 
@@ -257,7 +257,7 @@ install -m 0644 deployment/docker-compose.yml /opt/dockseed-gitlab/docker-compos
   install -m 0600 deployment/.env /opt/dockseed-gitlab/.env
 ```
 
-私下对照 `deployment/runtime-omnibus.rb` 还原实际注入配置：它不一定已写入 gitlab.rb，原 shell 覆盖须落实到新配置。调整精确镜像、本机平台和隔离设置，不输出 Secrets。复制 `.env` 后重新确认 `GITLAB_RESTART_POLICY=no`。若备份 Compose 较旧，只迁入业务配置，保留本版启动检查、可配置的重启策略及固定 `GITLAB_ALLOW_INITIALIZATION: "false"`。下段先核对挂载输出与登记的新 UUID，确认后才向空 config 目录复制。
+私下对照 `deployment/runtime-omnibus.rb` 还原实际注入配置：它不一定已写入 gitlab.rb，原 shell 覆盖须落实到新配置。调整精确镜像和隔离设置，确认镜像支持本机架构，不输出 Secrets。复制 `.env` 后重新确认 `GITLAB_RESTART_POLICY=no`。若备份 Compose 较旧，只迁入业务配置，保留本版启动检查、可配置的重启策略及固定 `GITLAB_ALLOW_INITIALIZATION: "false"`。下段先核对挂载输出与登记的新 UUID，确认后才向空 config 目录复制。
 
 ```bash
 findmnt --mountpoint /srv/gitlab -o TARGET,SOURCE,FSTYPE,UUID
