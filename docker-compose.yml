@@ -4,7 +4,6 @@ services:
   gitlab:
     image: gitlab/gitlab-ce:${GITLAB_VERSION:?请在 .env 中配置 GITLAB_VERSION}
     container_name: dockseed-gitlab
-    platform: ${GITLAB_PLATFORM:-linux/arm64}
     restart: "${GITLAB_RESTART_POLICY:-unless-stopped}"
     # 每次启动先检查已有数据，仅一次性的 compose run --rm 容器可显式初始化。
     # 初始化检查中的 -L 也会捕获悬空符号链接，不能借此绕过 PG_VERSION 检查。

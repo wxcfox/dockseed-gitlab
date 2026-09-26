@@ -91,9 +91,13 @@ registry_state=$(docker exec "$cid" /opt/gitlab/embedded/bin/ruby -ryaml -e '
     # registry-probe:begin
     path = "/var/opt/gitlab/registry/config.yml"
     config = File.file?(path) ? YAML.load_file(path) : {}
-    # GitLab 19.3 Omnibus defaults to "prefer"; it is not a boolean.
-    database = ["prefer", "true", true].include?(config.dig("database", "enabled")) ||
-        File.exist?("/var/opt/gitlab/gitlab-rails/shared/registry/docker/registry/lockfiles/database-in-use")
+    # In prefer mode an existing Registry can still use filesystem metadata.
+    lock_dir = "/var/opt/gitlab/gitlab-rails/shared/registry/docker/registry/lockfiles"
+    database_lock = File.exist?("#{lock_dir}/database-in-use")
+    filesystem_lock = File.exist?("#{lock_dir}/filesystem-in-use")
+    abort "conflicting Registry metadata lockfiles" if database_lock && filesystem_lock
+    mode = config.dig("database", "enabled")
+    database = mode == "prefer" ? !filesystem_lock : (["true", true].include?(mode) || database_lock)
     puts "#{File.file?(path) || database} #{database}"
     # registry-probe:end
 ')
@@ -130,7 +134,7 @@ docker exec "$cid" printenv GITLAB_OMNIBUS_CONFIG > "$run/runtime-omnibus.rb"
 [[ -s $run/runtime-omnibus.rb ]] || fail 'missing injected GITLAB_OMNIBUS_CONFIG'
 commit=$(git -C "$repo" rev-parse --verify HEAD)
 # Explicit file list: never archive the checkout, .git or unrelated credentials.
-deployment=(docker-compose.yml .env README.md ops/backup.sh ops/transfer.sh docs/recovery.md)
+deployment=(docker-compose.yml .env README.md ops/backup.sh ops/transfer.sh docs/recovery.md docs/email.md)
 for file in "${deployment[@]}"; do
     [[ -s $repo/$file && ! -L $repo/$file ]] || fail "missing deployment material (or symlink): $file"
 done
