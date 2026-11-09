@@ -90,6 +90,10 @@ Mac 不配置这些参数时仍只监听 `127.0.0.1`。使用 Tunnel 时由 `doc
 
 本工程无需邮件配置即可运行。需要注册验证、密码重置或通知邮件时，按[可选邮件配置](docs/email.md)在各实例持久化的 `gitlab.rb` 中启用 SMTP；无需改 Compose 或 GitLab 源码。不要把邮箱密码写入本工程的 `.env` 或提交到仓库。
 
+## 单点登录（OIDC，可选）
+
+默认使用 GitLab 本地账号密码登录。需要接入企业的 OIDC 身份提供方（IdP）时，按[单点登录](docs/sso.md)在各实例持久化的 `gitlab.rb` 中启用 GitLab 自带的 OpenID Connect 登录；无需改 Compose 或 GitLab 源码。不要把 Client Secret 写入本工程的 `.env` 或提交到仓库。
+
 ## Container Registry
 
 GitLab 自带的 Container Registry 默认关闭。`.env` 中留空 `GITLAB_REGISTRY_EXTERNAL_URL` 时，现有部署行为不变。

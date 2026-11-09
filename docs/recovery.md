@@ -322,7 +322,7 @@ docker exec -it dockseed-gitlab gitlab-backup restore "BACKUP=$BACKUP_ID" &&
 
 ### 隔离恢复验收
 
-首次上线前必须完成一次独立真实恢复。等待健康后执行以下检查，并验证管理员/普通用户登录、关键仓库已知提交、Issue/MR、权限及 Secrets/CI 变量解密。团队使用 HTTPS 和 SSH 时，两种方式分别完成 Clone、Fetch、测试分支 Push 与回读，最后删除测试分支和临时凭证，不修改业务分支。Registry 须核对关键仓库的标签与摘要并实际拉取镜像，不能只数镜像层文件。实际使用的 CI、Registry、LFS、上传和 Packages 须逐项验收；使用隔离 Runner 和测试目标。
+首次上线前必须完成一次独立真实恢复。等待健康后执行以下检查，并验证管理员/普通用户登录、关键仓库已知提交、Issue/MR、权限及 Secrets/CI 变量解密。团队使用 HTTPS 和 SSH 时，两种方式分别完成 Clone、Fetch、测试分支 Push 与回读，最后删除测试分支和临时凭证，不修改业务分支。Registry 须核对关键仓库的标签与摘要并实际拉取镜像，不能只数镜像层文件。实际使用的 CI、Registry、LFS、上传和 Packages 须逐项验收；使用隔离 Runner 和测试目标。已关闭网页密码登录的实例，按[单点登录](sso.md#注意事项)临时恢复密码登录完成验收。
 
 ```bash
 docker compose ps
