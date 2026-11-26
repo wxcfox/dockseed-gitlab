@@ -94,6 +94,12 @@ Mac 不配置这些参数时仍只监听 `127.0.0.1`。使用 Tunnel 时由 `doc
 
 默认使用 GitLab 本地账号密码登录。需要接入企业的 OIDC 身份提供方（IdP）时，按[单点登录](docs/sso.md)在各实例持久化的 `gitlab.rb` 中启用 GitLab 自带的 OpenID Connect 登录；无需改 Compose 或 GitLab 源码。不要把 Client Secret 写入本工程的 `.env` 或提交到仓库。
 
+## 删除需管理员共同确认（可选）
+
+默认关闭。启用后，任何工程或组（包括个人空间下的工程）被点删除时，都转成申请工程里的一个合并请求，并 @ 全部管理员；同意的管理员够 N 位（N 可配置，发起人是管理员时自动算一票），程序立即删除，对象进入回收站。管理员点 Approve 表示同意，关闭合并请求表示拒绝。它由写进 `gitlab.rb` 的 Nginx 转发规则、`deletion-control` profile 下的一个服务和一个系统钩子组成，不启用时现有部署完全不变。安装、演练、调整人数和已知边界见[删除需管理员共同确认](docs/deletion-control.md)。
+
+deletion-control 使用一个专用管理员账号的令牌和一把访问内部入口的密钥，放在宿主机的密钥目录中（目录 `0700`、文件 `0600`，Linux 上属主为容器用户 `65534:65534`），不写入 `.env`、不提交到仓库，也不进入备份。
+
 ## Container Registry
 
 GitLab 自带的 Container Registry 默认关闭。`.env` 中留空 `GITLAB_REGISTRY_EXTERNAL_URL` 时，现有部署行为不变。

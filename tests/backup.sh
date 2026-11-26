@@ -6,9 +6,11 @@ repo=$(cd "$(dirname "$0")/.." && pwd -P)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/dockseed-backup-test.XXXXXX")
 fixture=$(cd "$fixture" && pwd -P)
 trap 'rm -rf -- "$fixture"' EXIT
-mkdir -p "$fixture/bin" "$fixture/project/ops" "$fixture/project/docs"
+mkdir -p "$fixture/bin" "$fixture/project/ops/deletion-control" "$fixture/project/docs"
 cp "$repo/ops/backup.sh" "$fixture/project/ops/"
-for file in docker-compose.yml README.md ops/transfer.sh docs/recovery.md docs/email.md; do
+deployment_files=(docker-compose.yml README.md ops/transfer.sh docs/recovery.md docs/email.md
+    ops/deletion-control/deletion_control.py ops/deletion-control/gitlab.rb.example docs/deletion-control.md)
+for file in "${deployment_files[@]}"; do
     printf 'offline deployment fixture\n' > "$fixture/project/$file"
 done
 # Literal shell syntax creates a sentinel if deployment .env is accidentally sourced.
@@ -264,7 +266,7 @@ local_valid() {
     grep -qx "checksums_sha256=$checksum" "$payload/LOCAL_COMPLETE"
     grep -qx "backup_id=${payload##*/}" "$payload/LOCAL_COMPLETE"
     tar -tf "$payload/deployment.tar" > "$MOCK_STATE/deployment-members"
-    for member in .env README.md runtime-omnibus.rb ops/backup.sh ops/transfer.sh docs/recovery.md docs/email.md; do
+    for member in .env runtime-omnibus.rb ops/backup.sh "${deployment_files[@]}"; do
         grep -qx "$member" "$MOCK_STATE/deployment-members"
     done
     [[ $(find "$payload" -type f | wc -l | tr -d ' ') = 7 && -s $payload/operations.log ]]
