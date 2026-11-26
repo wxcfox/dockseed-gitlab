@@ -99,7 +99,7 @@ export OSSUTIL_PROFILE=default
 
 ### Registry 元数据库
 
-**镜像层文件和元数据库必须一起备份。** 仅有 `registry.tar.gz` 可能恢复不出仓库标签。以下适用于本工程当前的单机 GitLab 19.3；未使用元数据库的旧版本仍按其官方说明处理。
+**镜像层文件和元数据库必须一起备份。** 仅有 `registry.tar.gz` 可能恢复不出仓库标签。以下适用于本工程当前的单机 GitLab 19.6；未使用元数据库的旧版本仍按其官方说明处理。
 
 在容器 `/etc/gitlab/gitlab.rb` 中配置以下内容（ECS 对应 `/srv/gitlab/config/gitlab.rb`）：
 
@@ -133,9 +133,9 @@ BACKUP_WORK_DIR="$HOME/gitlab-backup-work" BACKUP_ESTIMATE_KB=20971520 bash ops/
 
 只有成功时 stdout 才输出完整目录的绝对路径，阶段日志走 stderr。看到 `success; local backup ready` 后保存最后一行路径，供上传使用；不必重新执行备份。完整目录含四个备份文件：应用原始 ID 的 `_gitlab_backup.tar`、`config.tar`、`deployment.tar`、`manifest.txt`，以及 `SHA256SUMS`、`LOCAL_COMPLETE` 和私有 `operations.log`。成功后仅清理本次容器临时备份并释放锁，本地备份保留。
 
-配置包必须含 gitlab.rb 与 Secrets；部署包仅包含 `docker-compose.yml`、真实 `.env`、实际注入的 `runtime-omnibus.rb`、README、两个脚本、恢复说明和可选邮件说明。清单记录精确 GitLab 版本、CE/EE、镜像标识/平台、备份 ID/文件名/时间及工程提交。`.env` 不能作为 Shell 脚本 `source`。
+配置包必须含 gitlab.rb 与 Secrets；部署包仅包含 `docker-compose.yml`、真实 `.env`、实际注入的 `runtime-omnibus.rb`、README、两个脚本、恢复说明、可选邮件说明，以及删除控制的程序、`gitlab.rb` 规则示例和[说明](deletion-control.md)。清单记录精确 GitLab 版本、CE/EE、镜像标识/平台、备份 ID/文件名/时间及工程提交。`.env` 不能作为 Shell 脚本 `source`。
 
-**这不是整台服务器的备份。** `compose.override.yml`、其他 Compose 覆盖文件、systemd/cron、磁盘挂载、反向代理、DNS、TLS 和网络配置均不在部署包中；`runtime-omnibus.rb` 也不包含端口、网络或卷的覆盖设置。使用这些配置时，另存环境说明及必要文件，并确保 GitLab 不可用时仍可取得；凭据另行保护，不提交到本工程。
+**这不是整台服务器的备份。** `compose.override.yml`、其他 Compose 覆盖文件、systemd/cron、磁盘挂载、反向代理、DNS、TLS、网络配置，以及删除控制的密钥目录均不在部署包中（删除控制的转发规则在 `gitlab.rb` 中，随配置包备份）；`runtime-omnibus.rb` 也不包含端口、网络或卷的覆盖设置。使用这些配置时，另存环境说明及必要文件，并确保 GitLab 不可用时仍可取得；凭据另行保护，不提交到本工程。
 
 环境覆盖文件用于调整端口、网络等部署设置，不得覆盖启动 `command`、`GITLAB_ALLOW_INITIALIZATION` 或三个数据卷的绑定；修改后用 `docker compose config` 私下核对合并结果（可能含密码，不贴到公开日志）。
 
@@ -211,7 +211,7 @@ tail -n 80 "/srv/gitlab/backup-work/scheduled-backup-$(date +%Y%m%d).log"
 
 恢复或升级前暂停备份计划，确认当前任务已结束；有失败锁则先排查。恢复使用独立 Docker daemon，避免固定容器/卷名与原实例冲突。在恢复工程的 `.env` 持久设置 `GITLAB_RESTART_POLICY=no`，并关闭其他自动启动入口，避免 `compose up` 重建后恢复默认自启。新数据卷先经一次性初始化并停止该容器，再创建正常容器。恢复期间只用 `compose start` 启动已创建容器；中途重启后重新核对磁盘和恢复进度，保持隔离再继续。初始化授权不得写入 `.env` 或日常 Compose。
 
-演练须在独立机器或隔离环境进行，先下载镜像和备份，再隔离入站及出站：不接生产域名/Tunnel，不连接生产 Runner，不触发生产 CI、邮件、Webhook 或外部存储写入。仅更改域名不足以阻止后台请求。生产切换前必须停用旧实例及其备份计划，避免两份实例同时接收业务。
+演练须在独立机器或隔离环境进行，先下载镜像和备份，再隔离入站及出站：不接生产域名/Tunnel，不连接生产 Runner，不触发生产 CI、邮件、Webhook 或外部存储写入。仅更改域名不足以阻止后台请求。启用了删除控制时，演练期间不建密钥目录、不启动 deletion-control，避免它按恢复出来的申请执行删除。生产切换前必须停用旧实例及其备份计划，避免两份实例同时接收业务。
 
 ### 场景一：正常重启
 
@@ -341,8 +341,9 @@ docker exec dockseed-gitlab gitlab-rake gitlab:doctor:secrets
 1. 核对并移除仅用于演练的配置，恢复正常网络与 Sidekiq；邮件、Webhook、Runner 等按实际使用情况恢复，未配置的功能不要算作验收通过。
 2. 恢复日常启动方式。由 Docker 管理时，将 `.env` 中 `GITLAB_RESTART_POLICY` 改回 `unless-stopped`，执行 `docker compose up -d gitlab`。若宿主机服务负责挂载检查和自动拉起，则保留 `no` 并按该服务的流程启动，避免 Docker 绕过挂载检查。本工程不提供该服务，须由部署方实现，并在独立验收环境实测 Docker 重启和整机重启后能否自动拉起 GitLab。
 3. 确认健康后切换入口、按需解除隔离；从员工实际使用的网络复测正式地址的登录及 HTTPS/SSH Git 操作，不能用服务器本机检查代替。
-4. 在新机生成、上传并下载校验一份备份，再启用新机的备份计划。记录最近一次成功备份、访问方式和启停方法。
+4. 启用了删除控制时，按[服务器重建后恢复](deletion-control.md#服务器重建后恢复)重新签发令牌、启动 deletion-control，并完成其中的部署后检查，再开放入口；转发规则随 `gitlab.rb` 从配置备份恢复。
+5. 在新机生成、上传并下载校验一份备份，再启用新机的备份计划。记录最近一次成功备份、访问方式和启停方法。
 
 ## 本地测试
 
-本地可对 `ops/backup.sh`、`ops/transfer.sh` 及 `tests/` 下三个测试脚本分别运行 `bash -n` 和已安装的 ShellCheck，再执行 `bash tests/backup.sh`、`bash tests/transfer.sh`、`bash tests/startup.sh`；测试仅用临时目录和 Mock；已安装 Compose CLI 时，启动测试另用示例参数验证配置渲染，不连接 Docker daemon、不操作容器或卷。真实 ESSD 挂载、OSS 传输/权限/保留规则和完整 GitLab 恢复仍须在独立环境验证，Mock 或正常停启不能代替恢复演练。
+本地可对 `ops/backup.sh`、`ops/transfer.sh` 及 `tests/` 下四个测试脚本分别运行 `bash -n` 和已安装的 ShellCheck，再执行 `bash tests/backup.sh`、`bash tests/transfer.sh`、`bash tests/startup.sh`、`bash tests/deletion_control.sh`；测试仅用临时目录和 Mock；已安装 Compose CLI 时，启动测试另用示例参数验证配置渲染（含 `deletion-control` profile），不连接 Docker daemon、不操作容器或卷。删除控制的测试需要 Python 3.9 及以上，用标准库 unittest 在本机回环地址启动临时桩服务，检查删除识别、计票与执行规则；它们不能代替[演练](deletion-control.md#演练)。真实 ESSD 挂载、OSS 传输/权限/保留规则和完整 GitLab 恢复仍须在独立环境验证，Mock 或正常停启不能代替恢复演练。

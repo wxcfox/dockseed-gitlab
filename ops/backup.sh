@@ -134,7 +134,8 @@ docker exec "$cid" printenv GITLAB_OMNIBUS_CONFIG > "$run/runtime-omnibus.rb"
 [[ -s $run/runtime-omnibus.rb ]] || fail 'missing injected GITLAB_OMNIBUS_CONFIG'
 commit=$(git -C "$repo" rev-parse --verify HEAD)
 # Explicit file list: never archive the checkout, .git or unrelated credentials.
-deployment=(docker-compose.yml .env README.md ops/backup.sh ops/transfer.sh docs/recovery.md docs/email.md)
+deployment=(docker-compose.yml .env README.md ops/backup.sh ops/transfer.sh docs/recovery.md docs/email.md
+    ops/deletion-control/deletion_control.py ops/deletion-control/gitlab.rb.example docs/deletion-control.md)
 for file in "${deployment[@]}"; do
     [[ -s $repo/$file && ! -L $repo/$file ]] || fail "missing deployment material (or symlink): $file"
 done

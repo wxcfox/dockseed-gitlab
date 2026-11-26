@@ -79,6 +79,45 @@ services:
       start_period: 5m
     stop_grace_period: 10m
 
+  # 删除需管理员共同确认（可选），见 docs/deletion-control.md。仅在启用 deletion-control
+  # profile 时创建；未启用时不渲染、不启动，gitlab 服务不受影响。转发规则写在持久化的
+  # gitlab.rb 里（ops/deletion-control/gitlab.rb.example），由 GitLab 自带的 Nginx 执行。
+  # 这里不能写 ${VAR:?}：未启用的 profile 也参与变量插值，必填项由程序启动时检查。
+  # 不设 depends_on，启停它不会连带启动或重建 gitlab。重启策略固定，不跟随
+  # GITLAB_RESTART_POLICY：gitlab.rb 里的规则把网页表单提交和工程、组的 API 写请求转给它判断，它没运行时这些请求会 502。
+  deletion-control:
+    image: python:3.12-alpine
+    profiles: [deletion-control]
+    container_name: dockseed-gitlab-deletion-control
+    restart: unless-stopped
+    command: [python3, -I, /opt/deletion-control/deletion_control.py]
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      DELETION_REQUIRED_ADMINS: ${DELETION_REQUIRED_ADMINS:-0}
+      DELETION_REQUESTS_PROJECT: ${DELETION_REQUESTS_PROJECT:-}
+    # 不发布端口：GitLab 自带的 Nginx 经 Compose 网络访问 deletion-control:8931，系统钩子访问
+    # deletion-control:8933；它再经 gitlab:8932（gitlab.rb 中只认密钥的内部入口）访问 GitLab。
+    volumes:
+      - type: bind
+        source: ./ops/deletion-control
+        target: /opt/deletion-control
+        read_only: true
+      # 令牌和内部入口密钥所在目录（token、upstream-key）。长格式绑定在宿主机路径不存在时报错，
+      # 不会自动创建空目录；挂载目录而非文件，覆盖文件后容器内立即可见。
+      - type: bind
+        source: ${DELETION_SECRETS_DIR:-./deletion-control}
+        target: /run/secrets/deletion-control
+        read_only: true
+    healthcheck:
+      test: [CMD, python3, -I, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8931/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
 volumes:
   dockseed-gitlab-config:
     external: true

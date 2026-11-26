@@ -16,3 +16,5 @@ dockseed-????????T??????Z-*/
 gitlab-secrets.json
 *.log
 .ossutil*
+# 删除控制的密钥目录（docs/deletion-control.md）
+/deletion-control/

@@ -92,16 +92,46 @@ render() {
     env -i PATH="$PATH" HOME="$HOME" docker compose --project-directory "$fixture" \
         --env-file "$fixture/compose.env" -f "$fixture/docker-compose.yml" config > "$fixture/rendered.yml"
 }
+# set -e does not stop on a failing "! grep", so negative checks need an explicit exit.
+absent() {
+    if grep "$@" "$fixture/rendered.yml"; then
+        printf 'FAIL: rendered Compose unexpectedly matches: %s\n' "$*" >&2
+        exit 1
+    fi
+}
 cat > "$fixture/compose.env" <<'ENV'
 GITLAB_VERSION=19.3.0-ce.0
 GITLAB_ROOT_PASSWORD=offline-fixture-only
 ENV
 render
 grep -Fq 'image: gitlab/gitlab-ce:19.3.0-ce.0' "$fixture/rendered.yml"
-! grep -Fq 'platform:' "$fixture/rendered.yml"
+absent -Fq 'platform:'
 grep -Fq 'restart: unless-stopped' "$fixture/rendered.yml"
 [[ $(grep -c 'host_ip: 127.0.0.1' "$fixture/rendered.yml") = 3 ]]
+absent -Eq 'dockseed-gitlab-deletion-control|python:'
 printf 'PASS: Compose / Mac defaults\n'
+
+# Optional deletion control renders only with its profile and leaves gitlab unchanged.
+env -i PATH="$PATH" HOME="$HOME" docker compose --project-directory "$fixture" \
+    --env-file "$fixture/compose.env" -f "$fixture/docker-compose.yml" config gitlab > "$fixture/gitlab-only.yml"
+printf 'COMPOSE_PROFILES=deletion-control\n' >> "$fixture/compose.env"
+render
+env -i PATH="$PATH" HOME="$HOME" docker compose --project-directory "$fixture" \
+    --env-file "$fixture/compose.env" -f "$fixture/docker-compose.yml" config gitlab > "$fixture/gitlab-with-profile.yml"
+cmp -s "$fixture/gitlab-only.yml" "$fixture/gitlab-with-profile.yml"
+grep -Fq 'container_name: dockseed-gitlab-deletion-control' "$fixture/rendered.yml"
+[[ $(grep -c 'image: python:3.12-alpine' "$fixture/rendered.yml") = 1 ]]
+[[ $(grep -c 'restart: unless-stopped' "$fixture/rendered.yml") = 2 ]]
+[[ $(grep -c 'read_only: true$' "$fixture/rendered.yml") -ge 3 ]]
+[[ $(grep -c 'no-new-privileges:true' "$fixture/rendered.yml") = 1 ]]
+# No published port: GitLab's own Nginx and the system hook reach it on the Compose network.
+[[ $(grep -c 'host_ip: 127.0.0.1' "$fixture/rendered.yml") = 3 ]]
+absent -Fq 'published: "8931"'
+grep -Fq 'DELETION_REQUIRED_ADMINS: "0"' "$fixture/rendered.yml"
+grep -Fq 'target: /run/secrets/deletion-control' "$fixture/rendered.yml"
+absent -Fq 'depends_on'
+sed -i.orig '/^COMPOSE_PROFILES=/d' "$fixture/compose.env"
+printf 'PASS: Compose / deletion-control profile is opt-in\n'
 
 cat >> "$fixture/compose.env" <<'ENV'
 GITLAB_EXTERNAL_URL=http://203.0.113.10:8929
@@ -113,7 +143,7 @@ GITLAB_RESTART_POLICY=no
 ENV
 render
 grep -Fq 'image: gitlab/gitlab-ce:19.3.0-ce.0' "$fixture/rendered.yml"
-! grep -Fq 'platform:' "$fixture/rendered.yml"
+absent -Fq 'platform:'
 grep -Eq "restart: [\"']?no[\"']?$" "$fixture/rendered.yml"
 grep -Fq "gitlab_rails['gitlab_ssh_host'] = '203.0.113.10'" "$fixture/rendered.yml"
 grep -Fq "registry_url = 'http://192.0.2.10:5050'" "$fixture/rendered.yml"

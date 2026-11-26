@@ -1,0 +1,69 @@
+# 删除需管理员共同确认（docs/deletion-control.md）：GitLab 自带 Nginx 的转发规则。
+# 追加到持久化的 /etc/gitlab/gitlab.rb 末尾，再执行 gitlab-ctl reconfigure（只重载 Nginx，不重启 GitLab）。
+# 追加前把 REPLACE_WITH_UPSTREAM_KEY 换成 upstream-key 文件的内容（文档第 3、6 步的命令会自动替换）。
+# 若 gitlab.rb 已设置 custom_nginx_config 或 custom_gitlab_server_config，把下面的内容合并进原有字符串，
+# 不要重复赋值，否则后一个会覆盖前一个。
+# 停用时先删除本段并 reconfigure，再停止 deletion-control 服务；顺序反过来，转发给它的请求会返回 502。
+
+nginx['custom_nginx_config'] = <<~'NGINX'
+  # 可能删除工程或组的请求交给 deletion-control，其余请求照常进入 GitLab。$uri 是解码并规整后的路径；
+  # 排除项只对 GitLab 不会当作删除工程或组的路径生效，拿不准的请求都交给 deletion-control 判断。
+  map $http_x_http_method_override $deletion_control_override {
+    "" 0;
+    default 1;
+  }
+  map "$deletion_control_override:$request_method:$uri" $deletion_control_route {
+    default 0;
+    "~^1:" 1;
+    "~^0:(POST|DELETE):/api/v4/(projects|groups)/" 1;
+    "~^0:(POST|DELETE):/api/" 0;
+    "~^0:(POST|DELETE):/admin/(projects|groups)/" 1;
+    "~^0:(POST|DELETE):/(admin|users|oauth|uploads|jwt|import|assets|-)(/|$)" 0;
+    "~^0:(POST|DELETE):.*(/-/|\.git/)." 0;
+    "~^0:(POST|DELETE):/" 1;
+  }
+
+  # deletion-control 转发放行的请求、调用 GitLab API 都走这个入口，不经过上面的判断。
+  # 只接受带密钥的请求，密钥只有 deletion-control 持有；也不要把这个端口映射到宿主机。
+  server {
+    listen 8932;
+    server_name deletion-control-upstream;
+    server_tokens off;
+    client_max_body_size 0;
+    if ($http_x_deletion_control_key != "REPLACE_WITH_UPSTREAM_KEY") {
+      return 403 "deletion-control upstream key mismatch\n";
+    }
+    location / {
+      proxy_pass http://gitlab-workhorse;
+      proxy_http_version 1.1;
+      proxy_read_timeout 3600;
+      proxy_connect_timeout 300;
+      proxy_redirect off;
+      proxy_request_buffering off;
+      proxy_cache off;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Real-IP $http_x_real_ip;
+      proxy_set_header X-Forwarded-For $http_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+      proxy_set_header X-Forwarded-Ssl $http_x_forwarded_ssl;
+      proxy_set_header X-Deletion-Control-Key "";
+    }
+  }
+NGINX
+
+nginx['custom_gitlab_server_config'] = <<~'NGINX'
+  if ($deletion_control_route) {
+    rewrite ^ /.deletion-control-route last;
+  }
+  # 整个请求体先缓冲再转发，deletion-control 需要 Content-Length 才能检查 _method。
+  location = /.deletion-control-route {
+    internal;
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $deletion_control_upstream deletion-control:8931;
+    proxy_pass http://$deletion_control_upstream$request_uri;
+    proxy_request_buffering on;
+    proxy_cache off;
+    proxy_read_timeout 3600;
+    proxy_connect_timeout 300;
+  }
+NGINX
